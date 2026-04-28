@@ -1,2 +1,14 @@
+# Dependencies
+node_modules/
+
+# Environment variables
 .env
-Descripcion_Proyecto.md
+.env.*
+
+# Logs
+logs
+*.log
+
+# Build output
+dist/
+build/
