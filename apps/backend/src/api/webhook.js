@@ -1,16 +1,18 @@
 const express = require('express');
-const checkSubscription = require('../middlewares/checkSubscription');
 const router = express.Router();
 
-// Endpoint para verificar el Webhook de Meta (Meta requiere esto para validar el webhook)
+// Webhook de Meta / WhatsApp Cloud API.
+// NOTA (Fase 0): placeholders. La verificación GET, la validación de firma
+// X-Hub-Signature-256, la idempotencia y el pipeline asíncrono se implementan en la Fase 1.
+
+// Verificación del webhook (Meta hace un GET al registrar la URL).
 router.get('/', (req, res) => {
-    res.send('Webhook endpoint is ready');
+  res.send('Webhook endpoint is ready');
 });
 
-// Endpoint POST para recibir los mensajes de WhatsApp
-router.post('/', checkSubscription, (req, res) => {
-    console.log('Mensaje de WhatsApp recibido y suscripción validada:', req.body);
-    res.status(200).send('EVENT_RECEIVED');
+// Recepción de mensajes. Meta exige responder 200 rápido.
+router.post('/', (req, res) => {
+  res.status(200).send('EVENT_RECEIVED');
 });
 
 module.exports = router;

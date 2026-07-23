@@ -1,0 +1,25 @@
+{
+  "name": "bellezabot-backend",
+  "version": "0.1.0",
+  "description": "Backend de BellezaBot: webhook de WhatsApp, IA de agendamiento y API del panel",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "db:setup": "node scripts/db-setup.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}

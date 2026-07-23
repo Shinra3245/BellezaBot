@@ -1,0 +1,23 @@
+# PostgreSQL local para desarrollo mientras el proyecto de Supabase se crea manualmente (Fase 0).
+# Levantar con:  docker compose up -d   (desde apps/backend/)
+# DATABASE_URL de desarrollo:  postgresql://bellezabot:bellezabot@localhost:5433/bellezabot
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: bellezabot-db
+    environment:
+      POSTGRES_USER: bellezabot
+      POSTGRES_PASSWORD: bellezabot
+      POSTGRES_DB: bellezabot
+    ports:
+      - "5433:5432"
+    volumes:
+      - bellezabot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bellezabot -d bellezabot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  bellezabot_pgdata:

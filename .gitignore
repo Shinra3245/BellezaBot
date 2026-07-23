@@ -4,6 +4,7 @@ node_modules/
 # Environment variables
 .env
 .env.*
+!.env.example
 
 # Logs
 logs
@@ -12,3 +13,9 @@ logs
 # Build output
 dist/
 build/
+
+# Archivos de contexto/instrucciones para el agente de IA y memoria (locales, no se versionan)
+CLAUDE.md
+PLAN_CONSTRUCCION_MVP.md
+PENDIENTES_MANUALES.md
+.claude/

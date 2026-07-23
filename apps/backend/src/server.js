@@ -1,20 +1,9 @@
-require('dotenv').config();
-const express = require('express');
-const webhookRoutes = require('./api/webhook');
+// Punto de arranque del servidor. Valida el entorno (al requerir env) y pone la app a escuchar.
+const env = require('./config/env');
+const { createApp } = require('./app');
 
-const app = express();
+const app = createApp();
 
-// Middlewares
-app.use(express.json()); // Para parsear body de peticiones como JSON
-
-// Rutas
-app.use('/webhook', webhookRoutes);
-
-app.get('/', (req, res) => {
-    res.send('¡El backend de BellezaBot está vivo!');
-});
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-    console.log(`Servidor escuchando en el puerto ${PORT}`);
+app.listen(env.PORT, () => {
+  console.log(`[server] BellezaBot escuchando en el puerto ${env.PORT} (${env.NODE_ENV})`);
 });
