@@ -1,0 +1,191 @@
+// Config de entorno ANTES de cargar la app (env.js lee process.env al requerirse).
+process.env.WHATSAPP_MODE = 'mock';
+process.env.META_VERIFY_TOKEN = 'test-verify-token';
+process.env.META_APP_SECRET = 'test-app-secret';
+process.env.NODE_ENV = 'test';
+
+const { test, before, after, beforeEach } = require('node:test');
+const assert = require('node:assert');
+const crypto = require('crypto');
+const request = require('supertest');
+const { createApp } = require('../src/app');
+const db = require('../src/config/db');
+const whatsappService = require('../src/services/whatsappService');
+const { processInboundMessage, FIXED_REPLY } = require('../src/services/messageHandler');
+const { SERVICE_UNAVAILABLE_MESSAGE } = require('../src/services/subscriptionService');
+
+const app = createApp();
+const DEMO_PHONE_NUMBER_ID = 'DEMO_PHONE_NUMBER_ID'; // del seed
+const settle = () => new Promise((r) => setTimeout(r, 120)); // deja terminar el procesamiento async
+
+// Firma un payload como lo haría Meta y devuelve { raw, signature }.
+function signPayload(payload) {
+  const raw = JSON.stringify(payload);
+  const signature =
+    'sha256=' + crypto.createHmac('sha256', 'test-app-secret').update(raw).digest('hex');
+  return { raw, signature };
+}
+
+function textMessagePayload({ phoneNumberId, from, waMessageId, text }) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: 'WABA_ID',
+        changes: [
+          {
+            field: 'messages',
+            value: {
+              messaging_product: 'whatsapp',
+              metadata: { display_phone_number: '15550000000', phone_number_id: phoneNumberId },
+              messages: [{ from, id: waMessageId, timestamp: '1700000000', type: 'text', text: { body: text } }],
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+async function cleanupTestData() {
+  await db.query(
+    `DELETE FROM messages WHERE conversation_id IN
+       (SELECT id FROM conversations WHERE client_phone LIKE 'testclient%')`
+  );
+  await db.query(`DELETE FROM conversations WHERE client_phone LIKE 'testclient%'`);
+}
+
+before(cleanupTestData);
+beforeEach(() => {
+  whatsappService.sentInMock.length = 0;
+});
+after(async () => {
+  await cleanupTestData();
+  await db.pool.end();
+});
+
+// --- 1.1 Verificación GET ---
+test('GET /webhook con verify_token correcto devuelve el challenge', async () => {
+  const res = await request(app)
+    .get('/webhook')
+    .query({ 'hub.mode': 'subscribe', 'hub.verify_token': 'test-verify-token', 'hub.challenge': '42abc' });
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(res.text, '42abc');
+});
+
+test('GET /webhook con verify_token incorrecto devuelve 403', async () => {
+  const res = await request(app)
+    .get('/webhook')
+    .query({ 'hub.mode': 'subscribe', 'hub.verify_token': 'malo', 'hub.challenge': '42abc' });
+  assert.strictEqual(res.status, 403);
+});
+
+// --- 1.2 Firma ---
+test('POST /webhook con firma inválida devuelve 401', async () => {
+  const { raw } = signPayload(textMessagePayload({
+    phoneNumberId: DEMO_PHONE_NUMBER_ID, from: 'testclient1', waMessageId: 'wamid.x', text: 'hola',
+  }));
+  const res = await request(app)
+    .post('/webhook')
+    .set('Content-Type', 'application/json')
+    .set('x-hub-signature-256', 'sha256=firmafalsa')
+    .send(raw);
+  assert.strictEqual(res.status, 401);
+});
+
+// --- 1.2 Ignorar eventos que no son mensajes de texto ---
+test('POST /webhook con evento de status responde 200 y no guarda mensaje', async () => {
+  const payload = {
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ field: 'messages', value: {
+      metadata: { phone_number_id: DEMO_PHONE_NUMBER_ID },
+      statuses: [{ id: 'wamid.s', status: 'delivered' }],
+    } }] }],
+  };
+  const { raw, signature } = signPayload(payload);
+  const res = await request(app).post('/webhook')
+    .set('Content-Type', 'application/json').set('x-hub-signature-256', signature).send(raw);
+  assert.strictEqual(res.status, 200);
+});
+
+// --- 1.2 Negocio desconocido ---
+test('POST /webhook con phone_number_id desconocido responde 200 sin crashear', async () => {
+  const { raw, signature } = signPayload(textMessagePayload({
+    phoneNumberId: 'NO_EXISTE', from: 'testclient1', waMessageId: 'wamid.unknown', text: 'hola',
+  }));
+  const res = await request(app).post('/webhook')
+    .set('Content-Type', 'application/json').set('x-hub-signature-256', signature).send(raw);
+  assert.strictEqual(res.status, 200);
+});
+
+// --- 1.2 Mensaje válido: se guarda y se procesa ---
+test('POST /webhook con mensaje de texto válido responde 200 y guarda el entrante', async () => {
+  const waMessageId = 'wamid.valid.' + Date.now();
+  const { raw, signature } = signPayload(textMessagePayload({
+    phoneNumberId: DEMO_PHONE_NUMBER_ID, from: 'testclient1', waMessageId, text: 'quiero una cita',
+  }));
+  const res = await request(app).post('/webhook')
+    .set('Content-Type', 'application/json').set('x-hub-signature-256', signature).send(raw);
+  assert.strictEqual(res.status, 200);
+
+  const { rows } = await db.query('SELECT direction, content FROM messages WHERE wa_message_id = $1', [waMessageId]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].direction, 'inbound');
+  await settle(); // deja terminar el envío mock async
+});
+
+// --- 1.2 Idempotencia ante reintentos de Meta ---
+test('POST /webhook con wa_message_id repetido no duplica el mensaje', async () => {
+  const waMessageId = 'wamid.dup.' + Date.now();
+  const { raw, signature } = signPayload(textMessagePayload({
+    phoneNumberId: DEMO_PHONE_NUMBER_ID, from: 'testclient1', waMessageId, text: 'hola',
+  }));
+  const send = () => request(app).post('/webhook')
+    .set('Content-Type', 'application/json').set('x-hub-signature-256', signature).send(raw);
+
+  const r1 = await send();
+  const r2 = await send();
+  assert.strictEqual(r1.status, 200);
+  assert.strictEqual(r2.status, 200);
+
+  const { rows } = await db.query('SELECT count(*)::int AS n FROM messages WHERE wa_message_id = $1', [waMessageId]);
+  assert.strictEqual(rows[0].n, 1);
+  await settle();
+});
+
+// --- Pipeline (unidad) ---
+test('processInboundMessage con suscripción activa envía la respuesta fija', async () => {
+  const business = {
+    id: '11111111-1111-1111-1111-111111111111',
+    wa_phone_number_id: DEMO_PHONE_NUMBER_ID,
+    is_active: true,
+    subscription_expiry: new Date(Date.now() + 86400000),
+  };
+  // Necesita una conversación real para guardar el outbound.
+  const conversationId = (await db.query(
+    `INSERT INTO conversations (business_id, client_phone, channel) VALUES ($1,'testclient9','whatsapp') RETURNING id`,
+    [business.id]
+  )).rows[0].id;
+
+  await processInboundMessage({ business, from: 'testclient9', text: 'hola', conversationId });
+  assert.strictEqual(whatsappService.sentInMock.length, 1);
+  assert.strictEqual(whatsappService.sentInMock[0].text, FIXED_REPLY);
+});
+
+test('processInboundMessage con suscripción inactiva envía el mensaje de servicio no disponible', async () => {
+  const business = {
+    id: '11111111-1111-1111-1111-111111111111',
+    wa_phone_number_id: DEMO_PHONE_NUMBER_ID,
+    is_active: false,
+    subscription_expiry: new Date(Date.now() - 86400000),
+  };
+  const conversationId = (await db.query(
+    `INSERT INTO conversations (business_id, client_phone, channel) VALUES ($1,'testclient8','whatsapp')
+     ON CONFLICT (business_id, client_phone, channel) DO UPDATE SET last_message_at = now() RETURNING id`,
+    [business.id]
+  )).rows[0].id;
+
+  await processInboundMessage({ business, from: 'testclient8', text: 'hola', conversationId });
+  assert.strictEqual(whatsappService.sentInMock.length, 1);
+  assert.strictEqual(whatsappService.sentInMock[0].text, SERVICE_UNAVAILABLE_MESSAGE);
+});
