@@ -35,6 +35,21 @@ async function saveInboundMessage({ conversationId, waMessageId, content }) {
 }
 
 /**
+ * Devuelve los últimos N mensajes de la conversación en orden cronológico,
+ * en formato [{ role, content }] para alimentar a la IA. Limita el historial para controlar tokens.
+ */
+async function getHistory(conversationId, limit = 20) {
+  const { rows } = await db.query(
+    `SELECT role, content FROM messages
+     WHERE conversation_id = $1
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [conversationId, limit]
+  );
+  return rows.reverse().map((r) => ({ role: r.role, content: r.content }));
+}
+
+/**
  * Guarda un mensaje saliente (respuesta del bot).
  */
 async function saveOutboundMessage({ conversationId, content, waMessageId = null }) {
@@ -45,4 +60,4 @@ async function saveOutboundMessage({ conversationId, content, waMessageId = null
   );
 }
 
-module.exports = { getOrCreate, saveInboundMessage, saveOutboundMessage };
+module.exports = { getOrCreate, saveInboundMessage, saveOutboundMessage, getHistory };
