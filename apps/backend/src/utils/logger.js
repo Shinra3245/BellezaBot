@@ -1,14 +1,16 @@
-// Logger mínimo con nivel y prefijo. En la Fase 3 se reemplaza por uno estructurado (pino)
-// con business_id en cada línea. Por ahora centraliza la salida para no dispersar console.log.
-function line(level, msg, meta) {
-  const ts = new Date().toISOString();
-  const extra = meta ? ` ${JSON.stringify(meta)}` : '';
-  const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-  fn(`[${ts}] [${level}] ${msg}${extra}`);
-}
+// Logger estructurado con pino. Mantiene la interfaz info/warn/error(msg, meta)
+// para no tocar las llamadas existentes; `meta` (con business_id, etc.) se emite como campos JSON.
+const pino = require('pino');
+const env = require('../config/env');
+
+const base = pino({
+  level: env.NODE_ENV === 'test' ? 'silent' : 'info',
+});
+
+const wrap = (level) => (msg, meta) => base[level](meta || {}, msg);
 
 module.exports = {
-  info: (msg, meta) => line('info', msg, meta),
-  warn: (msg, meta) => line('warn', msg, meta),
-  error: (msg, meta) => line('error', msg, meta),
+  info: wrap('info'),
+  warn: wrap('warn'),
+  error: wrap('error'),
 };

@@ -205,3 +205,27 @@ test('processInboundMessage con suscripción inactiva envía el mensaje de servi
   assert.strictEqual(whatsappService.sentInMock.length, 1);
   assert.strictEqual(whatsappService.sentInMock[0].text, SERVICE_UNAVAILABLE_MESSAGE);
 });
+
+test('rate limiting: cliente que excede 15 mensajes/hora no recibe respuesta de IA', async () => {
+  const business = {
+    id: DEMO_BUSINESS_ID,
+    wa_phone_number_id: DEMO_PHONE_NUMBER_ID,
+    is_active: true,
+    subscription_expiry: new Date(Date.now() + 86400000),
+  };
+  const conversationId = (await db.query(
+    `INSERT INTO conversations (business_id, client_phone, channel) VALUES ($1,'testclientRL','whatsapp')
+     ON CONFLICT (business_id, client_phone, channel) DO UPDATE SET last_message_at = now() RETURNING id`,
+    [business.id]
+  )).rows[0].id;
+  // 16 mensajes entrantes en la última hora → excede el límite (15).
+  for (let i = 0; i < 16; i++) {
+    await db.query(
+      `INSERT INTO messages (conversation_id, direction, role, content) VALUES ($1,'inbound','user',$2)`,
+      [conversationId, 'spam ' + i]
+    );
+  }
+
+  await processInboundMessage({ business, from: 'testclientRL', text: 'otro', conversationId });
+  assert.strictEqual(whatsappService.sentInMock.length, 0, 'no debe responder al exceder el rate limit');
+});

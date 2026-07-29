@@ -60,4 +60,24 @@ async function saveOutboundMessage({ conversationId, content, waMessageId = null
   );
 }
 
-module.exports = { getOrCreate, saveInboundMessage, saveOutboundMessage, getHistory };
+/**
+ * Cuenta los mensajes entrantes de una conversación en los últimos `minutes` minutos.
+ * Usado para rate limiting por cliente (proteger costos de IA ante spam).
+ */
+async function countRecentInbound(conversationId, minutes = 60) {
+  const { rows } = await db.query(
+    `SELECT count(*)::int AS n FROM messages
+     WHERE conversation_id = $1 AND direction = 'inbound'
+       AND created_at > now() - ($2 || ' minutes')::interval`,
+    [conversationId, String(minutes)]
+  );
+  return rows[0].n;
+}
+
+module.exports = {
+  getOrCreate,
+  saveInboundMessage,
+  saveOutboundMessage,
+  getHistory,
+  countRecentInbound,
+};

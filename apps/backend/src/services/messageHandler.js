@@ -9,6 +9,9 @@ const { isSubscriptionActive, SERVICE_UNAVAILABLE_MESSAGE } = require('./subscri
 // Mensaje de cortesía si la IA falla (timeout, error de API).
 const AI_FALLBACK_MESSAGE = 'Dame un momento, en breve te atiendo 🙏';
 
+// Rate limiting: máximo de mensajes procesados por hora por cliente (protege costos de IA ante spam).
+const MAX_MESSAGES_PER_HOUR = 15;
+
 /**
  * Procesa un mensaje entrante: valida suscripción, genera respuesta con IA, la guarda y la envía.
  * @param {{ business, from, text, conversationId }} ctx
@@ -21,6 +24,15 @@ async function processInboundMessage({ business, from, conversationId }, deps = 
   if (!isSubscriptionActive(business)) {
     await sendAndStore({ business, from, conversationId, reply: SERVICE_UNAVAILABLE_MESSAGE });
     logger.warn('Mensaje recibido con suscripción inactiva', { business_id: business.id, from });
+    return;
+  }
+
+  // Rate limiting por cliente: si excede el límite por hora, no llamamos a la IA (anti-spam).
+  const recentCount = await conversationService.countRecentInbound(conversationId, 60);
+  if (recentCount > MAX_MESSAGES_PER_HOUR) {
+    logger.warn('Cliente excedió el rate limit; se omite la IA', {
+      business_id: business.id, from, recentCount,
+    });
     return;
   }
 
