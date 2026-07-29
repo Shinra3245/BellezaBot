@@ -44,27 +44,40 @@ async function sendTextMessage(phoneNumberId, to, text) {
     text: { body: text },
   };
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.META_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+  // Reintentos ante fallos de red transitorios (no ante rechazos de Meta, que son definitivos).
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.META_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
 
-    if (!res.ok) {
-      // Loggear la respuesta de Meta sin tumbar el proceso.
-      const detail = await res.text().catch(() => '');
-      logger.error('[whatsapp] Meta rechazó el envío', { status: res.status, to, detail });
-      return { mode: 'real', ok: false };
+      if (!res.ok) {
+        // Rechazo de Meta (4xx/5xx con respuesta): definitivo, no reintentar.
+        const detail = await res.text().catch(() => '');
+        logger.error('[whatsapp] Meta rechazó el envío', { status: res.status, to: recipient, detail });
+        return { mode: 'real', ok: false };
+      }
+      if (attempt > 1) logger.info('[whatsapp] Envío exitoso tras reintento', { to: recipient, attempt });
+      return { mode: 'real', ok: true };
+    } catch (err) {
+      // Error de red (fetch failed, timeout): reintentar con backoff.
+      if (attempt === MAX_ATTEMPTS) {
+        logger.error('[whatsapp] Error de red al enviar a Meta (agotados los reintentos)', {
+          to: recipient, error: err.message, attempts: attempt,
+        });
+        return { mode: 'real', ok: false };
+      }
+      logger.warn('[whatsapp] Error de red al enviar; reintentando', { to: recipient, error: err.message, attempt });
+      await new Promise((r) => setTimeout(r, 600 * attempt));
     }
-    return { mode: 'real', ok: true };
-  } catch (err) {
-    logger.error('[whatsapp] Error de red al enviar a Meta', { to, error: err.message });
-    return { mode: 'real', ok: false };
   }
+  return { mode: 'real', ok: false };
 }
 
 module.exports = { sendTextMessage, sentInMock, normalizeRecipient };
