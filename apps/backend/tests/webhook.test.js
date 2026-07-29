@@ -160,6 +160,15 @@ test('POST /webhook con wa_message_id repetido no duplica el mensaje', async () 
   await settle();
 });
 
+// --- Normalización de número destino (México) ---
+test('normalizeRecipient quita el "1" extra de los wa_id de México', () => {
+  assert.strictEqual(whatsappService.normalizeRecipient('5214131060699'), '524131060699');
+  assert.strictEqual(whatsappService.normalizeRecipient('524131060699'), '524131060699');
+  assert.strictEqual(whatsappService.normalizeRecipient('+52 1 413 106 0699'), '524131060699');
+  // No toca números de otros países.
+  assert.strictEqual(whatsappService.normalizeRecipient('14155550123'), '14155550123');
+});
+
 // --- Pipeline (unidad) ---
 test('processInboundMessage con suscripción activa envía la respuesta de IA (mock)', async () => {
   const business = {
