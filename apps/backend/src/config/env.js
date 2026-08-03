@@ -41,6 +41,9 @@ const env = {
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',
 
+  // Orígenes permitidos del panel web (lista separada por comas). Solo se aplica en producción.
+  FRONTEND_URL: process.env.FRONTEND_URL,
+
   DEFAULT_TIMEZONE: process.env.DEFAULT_TIMEZONE || 'America/Mexico_City',
 };
 

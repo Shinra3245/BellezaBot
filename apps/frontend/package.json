@@ -1,0 +1,21 @@
+{
+  "name": "bellezabot-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Panel web (PWA mobile-first) de BellezaBot para dueñas y super-admin",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.8"
+  }
+}
