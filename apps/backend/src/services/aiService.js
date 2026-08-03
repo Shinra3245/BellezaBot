@@ -5,6 +5,7 @@ const time = require('../utils/time');
 const logger = require('../utils/logger');
 const appointmentService = require('./appointmentService');
 const botTools = require('../tools/botTools');
+const adminTools = require('../tools/adminTools');
 
 const MAX_TOOL_ITERATIONS = 5;
 const MAX_TOKENS = 1024; // respuestas cortas estilo WhatsApp
@@ -54,6 +55,42 @@ async function buildSystem(business) {
   ];
 }
 
+// System prompt del MODO ADMIN (la dueña opera su propia agenda desde su celular).
+async function buildAdminSystem(business) {
+  const services = await appointmentService.listServices(business.id);
+  const serviceLines = services.length
+    ? services
+        .map((s) => `- ${s.name} (id: ${s.id}) — $${Number(s.price)} — ${s.duration_minutes} min`)
+        .join('\n')
+    : '(sin servicios configurados)';
+
+  const stable =
+    `Eres el asistente de administración de "${business.name}". Estás hablando con la DUEÑA del negocio, ` +
+    `no con una clienta. Tu tono es directo, ejecutivo y breve.\n\n` +
+    `Servicios del negocio:\n${serviceLines}\n\n` +
+    `Qué puedes hacer para la dueña (siempre con las tools, nunca inventes datos):\n` +
+    `- Consultar su agenda de un día (get_appointments) y el resumen de la semana (get_week_summary).\n` +
+    `- Cancelar una cita (cancel_appointment_admin) o reprogramarla (reschedule_appointment_admin).\n` +
+    `- Bloquear rangos de horario (block_time_slot) para que no se ofrezcan a clientas.\n\n` +
+    `Reglas:\n` +
+    `- Antes de CUALQUIER acción destructiva o irreversible (cancelar o reprogramar una cita), ` +
+    `confirma explícitamente con la dueña citando los datos ("¿Cancelo la cita de María de las 4 PM? Sí/No") ` +
+    `y solo ejecuta la tool cuando ella confirme.\n` +
+    `- Solo operas sobre las citas de ESTE negocio. Nunca menciones ni supongas datos de otros negocios.\n` +
+    `- Al cancelar o reprogramar, la clienta afectada recibe un aviso automático; infórmalo a la dueña.\n` +
+    `- Escribe en español, mensajes cortos estilo WhatsApp.`;
+
+  const now = time.nowInZone(business.timezone);
+  const volatile =
+    `Fecha y hora actual: ${time.formatDateTime(now)} (zona ${business.timezone}). ` +
+    `Interpreta "hoy", "mañana", "el viernes" con base en esta fecha.`;
+
+  return [
+    { type: 'text', text: stable, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: volatile },
+  ];
+}
+
 /**
  * Genera la respuesta del bot dado el negocio, el teléfono del cliente y el historial.
  * @param {{ business, clientPhone, history, client? }} args
@@ -61,11 +98,13 @@ async function buildSystem(business) {
  *   client: cliente de Anthropic inyectable (para pruebas); si se omite se usa el real.
  * @returns {Promise<string>} texto final para enviar por WhatsApp.
  */
-async function generateReply({ business, clientPhone, history, client }) {
+async function generateReply({ business, clientPhone, history, client, isAdmin = false }) {
   if (env.AI_MODE === 'mock' && !client) return MOCK_REPLY;
 
   const anthropic = client || getClient();
-  const system = await buildSystem(business);
+  // Bifurcación cliente/dueña: cambian el system prompt y el set de tools; el motor es el mismo.
+  const toolset = isAdmin ? adminTools : botTools;
+  const system = isAdmin ? await buildAdminSystem(business) : await buildSystem(business);
   const ctx = { business, clientPhone };
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
 
@@ -74,7 +113,7 @@ async function generateReply({ business, clientPhone, history, client }) {
       model: env.ANTHROPIC_MODEL,
       max_tokens: MAX_TOKENS,
       system,
-      tools: botTools.definitions,
+      tools: toolset.definitions,
       messages,
     });
 
@@ -84,7 +123,7 @@ async function generateReply({ business, clientPhone, history, client }) {
         if (block.type !== 'tool_use') continue;
         let result;
         try {
-          result = await botTools.execute(block.name, block.input, ctx);
+          result = await toolset.execute(block.name, block.input, ctx);
         } catch (err) {
           logger.error('[ai] Error ejecutando tool', { tool: block.name, error: err.message });
           result = JSON.stringify({ error: 'error_interno' });

@@ -62,6 +62,17 @@ CREATE TABLE appointments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Bloqueos de horario (la dueña marca rangos no disponibles: descansos, vacaciones, etc.)
+-- check_availability los respeta igual que una cita ocupada.
+CREATE TABLE blocks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id),
+  starts_at TIMESTAMPTZ NOT NULL,
+  ends_at TIMESTAMPTZ NOT NULL,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Conversaciones (una por cliente-negocio)
 CREATE TABLE conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -88,3 +99,4 @@ CREATE INDEX idx_appointments_business_date ON appointments (business_id, starts
 CREATE INDEX idx_appointments_reminders ON appointments (starts_at) WHERE status = 'confirmed' AND reminder_sent_at IS NULL;
 CREATE INDEX idx_messages_conversation ON messages (conversation_id, created_at);
 CREATE INDEX idx_conversations_lookup ON conversations (business_id, client_phone);
+CREATE INDEX idx_blocks_business_date ON blocks (business_id, starts_at);
