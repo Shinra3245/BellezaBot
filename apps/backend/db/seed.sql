@@ -36,11 +36,11 @@ WHERE NOT EXISTS (
 );
 
 -- Usuarios del panel.
--- password_hash es bcrypt de la contraseña demo "password" (solo para desarrollo).
--- MOCK: regenerar con hashes reales al construir el flujo de alta de usuarios (Fase 5).
+-- password_hash es bcrypt real de la contraseña demo "password" (solo para desarrollo).
+-- ⚠️ Cambiar estas credenciales antes del piloto real (ver PENDIENTES_MANUALES.md, Fase 5).
 INSERT INTO users (id, business_id, email, password_hash, role) VALUES
   ('33333333-3333-3333-3333-333333333301', '11111111-1111-1111-1111-111111111111',
-   'dueña@demo.com', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'owner'),
+   'duena@demo.com', '$2b$10$YUZU7PTXTA2nDkiGJDjmtupHPlPZ6eqc1Wzd0jpHkB2J3Vc4aScti', 'owner'),
   ('33333333-3333-3333-3333-333333333302', NULL,
-   'admin@bellezabot.com', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'superadmin')
+   'admin@bellezabot.com', '$2b$10$YUZU7PTXTA2nDkiGJDjmtupHPlPZ6eqc1Wzd0jpHkB2J3Vc4aScti', 'superadmin')
 ON CONFLICT (id) DO NOTHING;
