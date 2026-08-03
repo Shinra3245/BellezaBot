@@ -47,6 +47,18 @@ async function getOverlappingAppointments(businessId, fromISO, toISO) {
   return rows;
 }
 
+// Bloqueos de horario que se solapan con una ventana [from, to) para un negocio.
+async function getOverlappingBlocks(businessId, fromISO, toISO) {
+  const { rows } = await db.query(
+    `SELECT starts_at, ends_at
+     FROM blocks
+     WHERE business_id = $1
+       AND starts_at < $3 AND ends_at > $2`,
+    [businessId, fromISO, toISO]
+  );
+  return rows;
+}
+
 /**
  * Calcula los huecos libres para un día y servicio.
  * @returns {Promise<{ slots: Array<{datetime_iso, label}>, closed: boolean, tooFar: boolean }>}
@@ -74,12 +86,12 @@ async function getAvailability({ businessId, date, serviceId, timezone }) {
   if (schedules.length === 0) return { slots: [], closed: true };
 
   const dayEnd = dayStart.plus({ days: 1 });
-  const busy = await getOverlappingAppointments(
-    businessId,
-    dayStart.toISO(),
-    dayEnd.toISO()
-  );
-  const busyIntervals = busy.map((a) => ({
+  const [busy, blocks] = await Promise.all([
+    getOverlappingAppointments(businessId, dayStart.toISO(), dayEnd.toISO()),
+    getOverlappingBlocks(businessId, dayStart.toISO(), dayEnd.toISO()),
+  ]);
+  // Citas ocupadas y bloqueos de la dueña cuentan igual como "no disponible".
+  const busyIntervals = busy.concat(blocks).map((a) => ({
     start: time.DateTime.fromJSDate(a.starts_at).toMillis(),
     end: time.DateTime.fromJSDate(a.ends_at).toMillis(),
   }));
@@ -182,12 +194,198 @@ async function cancelAppointment({ businessId, clientPhone, appointmentId }) {
   return { id: rows[0].id };
 }
 
+// ---------------------------------------------------------------------------
+// Funciones de administración (modo dueña). El business_id SIEMPRE viene del
+// contexto del servidor: la dueña solo puede ver/tocar citas de SU negocio.
+// ---------------------------------------------------------------------------
+
+/**
+ * Lista las citas de un día (todas menos las canceladas) con datos de la clienta y el servicio.
+ * @returns {Promise<Array>} citas ordenadas por hora de inicio.
+ */
+async function getAppointmentsByDate({ businessId, date, timezone }) {
+  const dayStart = time.startOfDay(date, timezone);
+  if (!dayStart.isValid) return { error: 'fecha_invalida' };
+  const dayEnd = dayStart.plus({ days: 1 });
+
+  const { rows } = await db.query(
+    `SELECT a.id, a.client_name, a.client_phone, a.starts_at, a.status,
+            s.name AS service_name
+     FROM appointments a
+     JOIN services s ON s.id = a.service_id
+     WHERE a.business_id = $1
+       AND a.starts_at >= $2 AND a.starts_at < $3
+       AND a.status <> 'cancelled'
+     ORDER BY a.starts_at`,
+    [businessId, dayStart.toISO(), dayEnd.toISO()]
+  );
+  return {
+    appointments: rows.map((r) => ({
+      id: r.id,
+      client_name: r.client_name,
+      client_phone: r.client_phone,
+      service_name: r.service_name,
+      status: r.status,
+      when: time.formatTime(time.DateTime.fromJSDate(r.starts_at).setZone(timezone)),
+      starts_at: r.starts_at,
+    })),
+  };
+}
+
+// Carga una cita futura del negocio (con datos para notificar a la clienta).
+async function getFutureAppointment(businessId, appointmentId) {
+  const { rows } = await db.query(
+    `SELECT a.id, a.client_name, a.client_phone, a.starts_at, a.service_id, a.status,
+            s.name AS service_name, s.duration_minutes
+     FROM appointments a
+     JOIN services s ON s.id = a.service_id
+     WHERE a.id = $1 AND a.business_id = $2
+       AND a.starts_at > now() AND a.status = ANY($3)`,
+    [appointmentId, businessId, ACTIVE_STATUSES]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * La dueña cancela cualquier cita futura de SU negocio.
+ * @returns la cita cancelada (con datos de la clienta para avisarle) o un error.
+ */
+async function cancelAppointmentAdmin({ businessId, appointmentId }) {
+  const appt = await getFutureAppointment(businessId, appointmentId);
+  if (!appt) return { error: 'cita_no_encontrada' };
+
+  const { rows } = await db.query(
+    `UPDATE appointments SET status = 'cancelled'
+     WHERE id = $1 AND business_id = $2 AND starts_at > now() AND status = ANY($3)
+     RETURNING id`,
+    [appointmentId, businessId, ACTIVE_STATUSES]
+  );
+  if (rows.length === 0) return { error: 'cita_no_encontrada' };
+  return {
+    id: appt.id,
+    clientPhone: appt.client_phone,
+    clientName: appt.client_name,
+    serviceName: appt.service_name,
+  };
+}
+
+/**
+ * La dueña reprograma una cita a un nuevo horario, revalidando disponibilidad
+ * (mismo lock por negocio que createAppointment; excluye la propia cita del conflicto).
+ * @returns datos para notificar a la clienta o un error.
+ */
+async function rescheduleAppointmentAdmin({ businessId, appointmentId, newDatetimeIso, timezone }) {
+  const appt = await getFutureAppointment(businessId, appointmentId);
+  if (!appt) return { error: 'cita_no_encontrada' };
+
+  const startsAt = time.parseISO(newDatetimeIso, timezone);
+  if (!startsAt.isValid) return { error: 'fecha_invalida' };
+  const endsAt = startsAt.plus({ minutes: appt.duration_minutes });
+
+  const now = time.nowInZone(timezone);
+  if (startsAt < now.plus({ minutes: MIN_LEAD_MINUTES })) return { error: 'muy_pronto' };
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [businessId]);
+
+    // Conflicto contra otras citas activas (excluye la que se está reprogramando) y bloqueos.
+    const { rows: conflicts } = await client.query(
+      `SELECT 1 FROM appointments
+       WHERE business_id = $1 AND status = ANY($2) AND id <> $5
+         AND starts_at < $4 AND ends_at > $3
+       UNION ALL
+       SELECT 1 FROM blocks
+       WHERE business_id = $1 AND starts_at < $4 AND ends_at > $3
+       LIMIT 1`,
+      [businessId, ACTIVE_STATUSES, startsAt.toISO(), endsAt.toISO(), appointmentId]
+    );
+    if (conflicts.length > 0) {
+      await client.query('ROLLBACK');
+      return { error: 'slot_ocupado' };
+    }
+
+    await client.query(
+      `UPDATE appointments SET starts_at = $1, ends_at = $2, status = 'rescheduled', reminder_sent_at = NULL
+       WHERE id = $3 AND business_id = $4`,
+      [startsAt.toISO(), endsAt.toISO(), appointmentId, businessId]
+    );
+    await client.query('COMMIT');
+
+    return {
+      id: appt.id,
+      clientPhone: appt.client_phone,
+      clientName: appt.client_name,
+      serviceName: appt.service_name,
+      whenLabel: time.formatDateTime(startsAt),
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Crea un bloqueo de horario (rango no disponible) que check_availability respeta.
+ */
+async function createBlock({ businessId, date, startTime, endTime, reason, timezone }) {
+  const dayStart = time.startOfDay(date, timezone);
+  if (!dayStart.isValid) return { error: 'fecha_invalida' };
+  const startsAt = time.atTime(dayStart, startTime);
+  const endsAt = time.atTime(dayStart, endTime);
+  if (!startsAt.isValid || !endsAt.isValid || endsAt <= startsAt) return { error: 'rango_invalido' };
+
+  const { rows } = await db.query(
+    `INSERT INTO blocks (business_id, starts_at, ends_at, reason)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [businessId, startsAt.toISO(), endsAt.toISO(), reason || null]
+  );
+  return {
+    id: rows[0].id,
+    whenLabel: `${time.formatDateTime(startsAt)} a ${time.formatTime(endsAt)}`,
+  };
+}
+
+/**
+ * Resumen de la semana en curso: conteo de citas por día y por estado.
+ */
+async function getWeekSummary({ businessId, timezone }) {
+  const now = time.nowInZone(timezone);
+  const weekStart = now.startOf('week'); // luxon: lunes
+  const weekEnd = weekStart.plus({ days: 7 });
+
+  const { rows } = await db.query(
+    `SELECT starts_at, status FROM appointments
+     WHERE business_id = $1 AND status <> 'cancelled'
+       AND starts_at >= $2 AND starts_at < $3
+     ORDER BY starts_at`,
+    [businessId, weekStart.toISO(), weekEnd.toISO()]
+  );
+
+  const byDay = {};
+  const byStatus = {};
+  for (const r of rows) {
+    const dayLabel = time.DateTime.fromJSDate(r.starts_at).setZone(timezone).setLocale('es').toFormat('cccc');
+    byDay[dayLabel] = (byDay[dayLabel] || 0) + 1;
+    byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+  }
+  return { total: rows.length, byDay, byStatus };
+}
+
 module.exports = {
   getService,
   listServices,
   getAvailability,
   createAppointment,
   cancelAppointment,
+  getAppointmentsByDate,
+  cancelAppointmentAdmin,
+  rescheduleAppointmentAdmin,
+  createBlock,
+  getWeekSummary,
   MIN_LEAD_MINUTES,
   MAX_DAYS_AHEAD,
 };

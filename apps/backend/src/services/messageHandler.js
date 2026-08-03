@@ -20,26 +20,32 @@ const MAX_MESSAGES_PER_HOUR = 15;
 async function processInboundMessage({ business, from, conversationId }, deps = {}) {
   const generateReply = deps.generateReply || aiService.generateReply;
 
-  // Suscripción vencida/inactiva: mensaje fijo, sin llamar a la IA.
+  // ¿Es la dueña operando desde su celular? → flujo admin; si no, flujo cliente.
+  const isAdmin = isOwner(business, from);
+
+  // Suscripción vencida/inactiva: mensaje fijo, sin llamar a la IA (aplica también a la dueña:
+  // es su recordatorio de pago).
   if (!isSubscriptionActive(business)) {
     await sendAndStore({ business, from, conversationId, reply: SERVICE_UNAVAILABLE_MESSAGE });
     logger.warn('Mensaje recibido con suscripción inactiva', { business_id: business.id, from });
     return;
   }
 
-  // Rate limiting por cliente: si excede el límite por hora, no llamamos a la IA (anti-spam).
-  const recentCount = await conversationService.countRecentInbound(conversationId, 60);
-  if (recentCount > MAX_MESSAGES_PER_HOUR) {
-    logger.warn('Cliente excedió el rate limit; se omite la IA', {
-      business_id: business.id, from, recentCount,
-    });
-    return;
+  // Rate limiting: solo para clientas (anti-spam de costos de IA). La dueña queda exenta.
+  if (!isAdmin) {
+    const recentCount = await conversationService.countRecentInbound(conversationId, 60);
+    if (recentCount > MAX_MESSAGES_PER_HOUR) {
+      logger.warn('Cliente excedió el rate limit; se omite la IA', {
+        business_id: business.id, from, recentCount,
+      });
+      return;
+    }
   }
 
   let reply;
   try {
     const history = await conversationService.getHistory(conversationId);
-    reply = await generateReply({ business, clientPhone: from, history });
+    reply = await generateReply({ business, clientPhone: from, history, isAdmin });
   } catch (err) {
     logger.error('Error generando respuesta de IA', { business_id: business.id, error: err.message });
     reply = AI_FALLBACK_MESSAGE;
@@ -53,4 +59,13 @@ async function sendAndStore({ business, from, conversationId, reply }) {
   await whatsappService.sendTextMessage(business.wa_phone_number_id, from, reply);
 }
 
-module.exports = { processInboundMessage, AI_FALLBACK_MESSAGE };
+/**
+ * ¿El remitente es la dueña del negocio? Compara normalizando ambos números al mismo formato
+ * (los wa_id de México traen un "1" extra que normalizeRecipient elimina).
+ */
+function isOwner(business, from) {
+  if (!business.owner_phone) return false;
+  return whatsappService.normalizeRecipient(from) === whatsappService.normalizeRecipient(business.owner_phone);
+}
+
+module.exports = { processInboundMessage, AI_FALLBACK_MESSAGE, isOwner };
