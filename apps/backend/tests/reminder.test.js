@@ -1,11 +1,13 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
+const { DateTime } = require('luxon');
 const db = require('../src/config/db');
 const reminderService = require('../src/services/reminderService');
 
 const BUSINESS_ID = '11111111-1111-1111-1111-111111111111';
 const MANICURE_ID = '22222222-2222-2222-2222-222222222201';
 const PHONE = 'remclient1';
+const TZ = 'America/Mexico_City';
 
 async function cleanup() {
   await db.query(
@@ -35,12 +37,13 @@ function fakeTemplateSender() {
 }
 
 test('runOnce envía recordatorio de citas dentro de 24h y no las reenvía', async () => {
-  // Cita confirmada dentro de 2 horas, sin recordatorio.
+  // Mismo horario local de mañana menos 30 minutos: está dentro de 24h y sí es "mañana".
+  const startsAt = DateTime.now().setZone(TZ).plus({ days: 1 }).minus({ minutes: 30 });
   const { rows } = await db.query(
     `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
-     VALUES ($1, $2, $3, 'Ana', now() + interval '2 hours', now() + interval '2 hours 45 minutes', 'confirmed')
+     VALUES ($1, $2, $3, 'Ana', $4, $5, 'confirmed')
      RETURNING id`,
-    [BUSINESS_ID, MANICURE_ID, PHONE]
+    [BUSINESS_ID, MANICURE_ID, PHONE, startsAt.toISO(), startsAt.plus({ minutes: 45 }).toISO()]
   );
   const apptId = rows[0].id;
 
@@ -82,4 +85,19 @@ test('no envía recordatorio de citas a más de 24h', async () => {
   const sender = fakeTemplateSender();
   await reminderService.runOnce({ sendTemplateMessage: sender.fn });
   assert.ok(!sender.calls.some((c) => c.to === 'remclient2'), 'una cita a 3 días no debe recordarse aún');
+});
+
+test('no llama "mañana" a una cita del mismo día', async () => {
+  const now = DateTime.now().setZone(TZ);
+  const startsAt = now.endOf('day').minus({ minutes: 1 });
+  if (startsAt <= now) return; // borde excepcional del último minuto del día
+
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, 'remclient3', 'Mismo día', $3, $4, 'confirmed')`,
+    [BUSINESS_ID, MANICURE_ID, startsAt.toISO(), startsAt.plus({ minutes: 45 }).toISO()]
+  );
+  const sender = fakeTemplateSender();
+  await reminderService.runOnce({ sendTemplateMessage: sender.fn });
+  assert.ok(!sender.calls.some((c) => c.to === 'remclient3'), 'la plantilla "mañana" no aplica el mismo día');
 });

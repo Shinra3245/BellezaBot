@@ -8,7 +8,7 @@ async function listBusinesses() {
   const { rows } = await db.query(
     `SELECT b.id, b.name, b.wa_phone, b.owner_phone, b.is_active, b.subscription_expiry,
             b.created_at,
-            (b.is_active AND (b.subscription_expiry IS NULL OR b.subscription_expiry > now())) AS subscription_ok,
+            (b.is_active AND b.subscription_expiry IS NOT NULL AND b.subscription_expiry > now()) AS subscription_ok,
             (SELECT email FROM users u WHERE u.business_id = b.id AND u.role = 'owner' ORDER BY u.created_at LIMIT 1) AS owner_email
      FROM businesses b
      ORDER BY b.created_at DESC`

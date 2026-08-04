@@ -106,12 +106,15 @@ async function execute(name, input, ctx) {
       const aviso =
         `Hola ${res.clientName || ''}, lamentamos informarte que tu cita de ${res.serviceName} fue cancelada. ` +
         `Escríbenos para reagendar cuando gustes. 🙏`.replace(/\s+/g, ' ').trim();
+      let notified = false;
       try {
-        await whatsappService.sendTextMessage(phoneNumberId, res.clientPhone, aviso);
+        const delivery = await whatsappService.sendTextMessage(phoneNumberId, res.clientPhone, aviso);
+        notified = Boolean(delivery?.ok);
+        if (!notified) throw new Error('envío rechazado por Meta');
       } catch (err) {
         logger.error('[admin] No se pudo avisar de la cancelación', { error: err.message });
       }
-      return JSON.stringify({ ok: true, cancelada: res.id, cliente_avisada: true });
+      return JSON.stringify({ ok: true, cancelada: res.id, cliente_avisada: notified });
     }
 
     case 'reschedule_appointment_admin': {
@@ -122,16 +125,19 @@ async function execute(name, input, ctx) {
         timezone,
       });
       if (res.error) return JSON.stringify({ error: res.error });
+      let notified = false;
       try {
-        await whatsappService.sendTemplateMessage(phoneNumberId, res.clientPhone, RESCHEDULE_TEMPLATE, [
+        const delivery = await whatsappService.sendTemplateMessage(phoneNumberId, res.clientPhone, RESCHEDULE_TEMPLATE, [
           res.clientName || 'cliente',
           res.serviceName,
           res.whenLabel,
         ]);
+        notified = Boolean(delivery?.ok);
+        if (!notified) throw new Error('envío rechazado por Meta');
       } catch (err) {
         logger.error('[admin] No se pudo avisar de la reprogramación', { error: err.message });
       }
-      return JSON.stringify({ ok: true, cita_id: res.id, nuevo_horario: res.whenLabel, cliente_avisada: true });
+      return JSON.stringify({ ok: true, cita_id: res.id, nuevo_horario: res.whenLabel, cliente_avisada: notified });
     }
 
     case 'block_time_slot': {

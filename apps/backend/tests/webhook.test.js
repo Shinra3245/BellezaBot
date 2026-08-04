@@ -229,3 +229,34 @@ test('rate limiting: cliente que excede 15 mensajes/hora no recibe respuesta de 
   await processInboundMessage({ business, from: 'testclientRL', text: 'otro', conversationId });
   assert.strictEqual(whatsappService.sentInMock.length, 0, 'no debe responder al exceder el rate limit');
 });
+
+test('un envío rechazado por Meta no se registra falsamente como outbound', async () => {
+  const business = {
+    id: DEMO_BUSINESS_ID,
+    wa_phone_number_id: DEMO_PHONE_NUMBER_ID,
+    is_active: true,
+    subscription_expiry: new Date(Date.now() + 86400000),
+  };
+  const conversationId = (await db.query(
+    `INSERT INTO conversations (business_id, client_phone, channel) VALUES ($1,'testclientFail','whatsapp')
+     ON CONFLICT (business_id, client_phone, channel) DO UPDATE SET last_message_at = now() RETURNING id`,
+    [business.id]
+  )).rows[0].id;
+
+  const originalSend = whatsappService.sendTextMessage;
+  whatsappService.sendTextMessage = async () => ({ mode: 'real', ok: false });
+  try {
+    await assert.rejects(
+      processInboundMessage({ business, from: 'testclientFail', conversationId }, { generateReply: async () => 'respuesta' }),
+      /no aceptó/
+    );
+  } finally {
+    whatsappService.sendTextMessage = originalSend;
+  }
+
+  const { rows } = await db.query(
+    `SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1 AND direction = 'outbound'`,
+    [conversationId]
+  );
+  assert.strictEqual(rows[0].n, 0);
+});

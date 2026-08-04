@@ -55,8 +55,12 @@ async function processInboundMessage({ business, from, conversationId }, deps = 
 }
 
 async function sendAndStore({ business, from, conversationId, reply }) {
+  const delivery = await whatsappService.sendTextMessage(business.wa_phone_number_id, from, reply);
+  if (!delivery || delivery.ok === false) {
+    throw new Error('WhatsApp no aceptó el mensaje saliente');
+  }
+  // Solo registrar como enviado después de que Meta lo acepta.
   await conversationService.saveOutboundMessage({ conversationId, content: reply });
-  await whatsappService.sendTextMessage(business.wa_phone_number_id, from, reply);
 }
 
 /**

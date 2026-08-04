@@ -20,8 +20,13 @@ async function findDueReminders() {
      JOIN businesses b ON b.id = a.business_id
      WHERE a.status = 'confirmed'
        AND a.reminder_sent_at IS NULL
+       AND b.is_active = true
+       AND b.subscription_expiry IS NOT NULL
+       AND b.subscription_expiry > now()
        AND a.starts_at > now()
-       AND a.starts_at <= now() + interval '24 hours'`
+       AND a.starts_at <= now() + interval '24 hours'
+       AND (a.starts_at AT TIME ZONE b.timezone)::date =
+           (now() AT TIME ZONE b.timezone)::date + 1`
   );
   return rows;
 }
