@@ -115,6 +115,24 @@ test('login bloquea temporalmente después de demasiados intentos fallidos', asy
   assert.ok(blocked.headers['retry-after']);
 });
 
+test('login bloquea por correo aunque Railway cambie la IP del proxy en cada intento', async () => {
+  const email = 'proxy-variable@paneltest.com';
+  for (let i = 0; i < 10; i++) {
+    const failed = await request(app)
+      .post('/auth/login')
+      .set('X-Forwarded-For', `203.0.113.${i + 1}`)
+      .send({ email, password: 'incorrecta' });
+    assert.strictEqual(failed.status, 401);
+  }
+
+  const blocked = await request(app)
+    .post('/auth/login')
+    .set('X-Forwarded-For', '198.51.100.200')
+    .send({ email, password: 'incorrecta' });
+  assert.strictEqual(blocked.status, 429);
+  assert.ok(blocked.headers['retry-after']);
+});
+
 test('ruta protegida sin token devuelve 401', async () => {
   const res = await request(app).get('/panel/services');
   assert.strictEqual(res.status, 401);

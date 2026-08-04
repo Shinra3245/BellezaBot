@@ -17,10 +17,12 @@ function asyncHandler(fn) {
 function errorHandler(err, req, res, next) {
   const status = err.status || err.statusCode || 500;
 
-  // Log del error del lado servidor (sin filtrar detalles internos al cliente en 5xx).
-  console.error(`[error] ${req.method} ${req.originalUrl} → ${status}:`, err.message);
+  // Los 401 esperados no deben inundar los logs. Conservamos bloqueos y fallos internos.
   if (status >= 500) {
+    console.error(`[error] ${req.method} ${req.originalUrl} → ${status}:`, err.message);
     console.error(err.stack);
+  } else if (status === 429) {
+    console.warn(`[security] ${req.method} ${req.originalUrl} → ${status}:`, err.message);
   }
 
   const body = { error: status >= 500 ? 'Error interno del servidor' : err.message };
