@@ -27,7 +27,9 @@ const USER_SUPER = 'eeeeeeee-eeee-eeee-eeee-eeeeeeee0001';
 let tokenOwnerP, tokenOwnerQ, tokenSuper;
 
 async function cleanup() {
-  const { rows } = await db.query(`SELECT id FROM businesses WHERE wa_phone LIKE '+52TEST%'`);
+  const { rows } = await db.query(
+    `SELECT id FROM businesses WHERE wa_phone LIKE '+52TEST%' OR wa_phone = '+525550000099'`
+  );
   for (const b of rows) {
     await db.query(`DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE business_id = $1)`, [b.id]);
     await db.query('DELETE FROM conversations WHERE business_id = $1', [b.id]);
@@ -37,7 +39,7 @@ async function cleanup() {
     await db.query('DELETE FROM services WHERE business_id = $1', [b.id]);
   }
   await db.query(`DELETE FROM users WHERE email LIKE '%@paneltest.com'`);
-  await db.query(`DELETE FROM businesses WHERE wa_phone LIKE '+52TEST%'`);
+  await db.query(`DELETE FROM businesses WHERE wa_phone LIKE '+52TEST%' OR wa_phone = '+525550000099'`);
 }
 
 before(async () => {
@@ -102,6 +104,17 @@ test('login sin campos devuelve 400', async () => {
   assert.strictEqual(res.status, 400);
 });
 
+test('login bloquea temporalmente después de demasiados intentos fallidos', async () => {
+  const email = 'ataque@paneltest.com';
+  for (let i = 0; i < 10; i++) {
+    const failed = await login(email, 'incorrecta');
+    assert.strictEqual(failed.status, 401);
+  }
+  const blocked = await login(email, 'incorrecta');
+  assert.strictEqual(blocked.status, 429);
+  assert.ok(blocked.headers['retry-after']);
+});
+
 test('ruta protegida sin token devuelve 401', async () => {
   const res = await request(app).get('/panel/services');
   assert.strictEqual(res.status, 401);
@@ -149,6 +162,18 @@ test('crear, actualizar y desactivar un servicio', async () => {
   assert.strictEqual(del.status, 200);
 });
 
+test('rechaza servicios con precio o duración inválidos', async () => {
+  const negative = await request(app).post('/panel/services')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ name: 'Inválido', price: -10, duration_minutes: -5 });
+  assert.strictEqual(negative.status, 400);
+
+  const zeroDuration = await request(app).post('/panel/services')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ name: 'Inválido', price: 10, duration_minutes: 0 });
+  assert.strictEqual(zeroDuration.status, 400);
+});
+
 // --- 5.2 CRUD de horarios ---
 test('crear y eliminar un horario', async () => {
   const created = await request(app).post('/panel/schedules')
@@ -160,6 +185,18 @@ test('crear y eliminar un horario', async () => {
   assert.strictEqual(del.status, 200);
 });
 
+test('rechaza horarios invertidos o con formato inválido', async () => {
+  const inverted = await request(app).post('/panel/schedules')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ day_of_week: 2, start_time: '19:00', end_time: '10:00' });
+  assert.strictEqual(inverted.status, 400);
+
+  const malformed = await request(app).post('/panel/schedules')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ day_of_week: 2, start_time: '99:00', end_time: '10:00' });
+  assert.strictEqual(malformed.status, 400);
+});
+
 // --- 5.2 Config del negocio ---
 test('actualizar la configuración del bot y el owner_phone', async () => {
   const res = await request(app).patch('/panel/business')
@@ -168,6 +205,18 @@ test('actualizar la configuración del bot y el owner_phone', async () => {
   assert.strictEqual(res.status, 200);
   assert.strictEqual(res.body.business.bot_name, 'Sofía');
   assert.strictEqual(res.body.business.owner_phone, '+525550001111');
+});
+
+test('rechaza teléfono y zona horaria inválidos en la configuración', async () => {
+  const phone = await request(app).patch('/panel/business')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ owner_phone: '555-no-e164' });
+  assert.strictEqual(phone.status, 400);
+
+  const timezone = await request(app).patch('/panel/business')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ timezone: 'Zona/Inventada' });
+  assert.strictEqual(timezone.status, 400);
 });
 
 // --- 5.2 Citas: listar, cambiar estado, reprogramar (dispara plantilla) ---
@@ -212,12 +261,17 @@ test('super-admin lista negocios, da de alta uno nuevo y controla la suscripció
   // Alta de negocio + owner.
   const created = await request(app).post('/admin/businesses')
     .set('Authorization', `Bearer ${tokenSuper}`)
-    .send({ name: 'Nuevo Salón', wa_phone: '+52TESTNEW', ownerEmail: 'nuevo@paneltest.com', ownerPassword: 'nuevopass' });
+    .send({
+      name: 'Nuevo Salón',
+      wa_phone: '+525550000099',
+      ownerEmail: 'nuevo@paneltest.com',
+      ownerPassword: 'nuevopass-segura-2026',
+    });
   assert.strictEqual(created.status, 201);
   const newBizId = created.body.business.id;
 
   // El nuevo owner puede iniciar sesión.
-  const loginNew = await login('nuevo@paneltest.com', 'nuevopass');
+  const loginNew = await login('nuevo@paneltest.com', 'nuevopass-segura-2026');
   assert.strictEqual(loginNew.status, 200);
 
   // Vencer la suscripción del nuevo negocio.

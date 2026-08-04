@@ -2,14 +2,18 @@
 // Si falta alguna variable obligatoria de la fase actual, el proceso truena con un mensaje claro.
 require('dotenv').config();
 
-// Variables obligatorias por fase. Se van habilitando conforme avanza el checklist del plan
-// para que el servidor arranque en fases tempranas sin exigir secretos que aún no aplican.
-const REQUIRED = [
-  'DATABASE_URL', // Fase 0: sin base de datos no hay /health ni nada útil
-  // 'META_VERIFY_TOKEN', 'META_ACCESS_TOKEN', 'META_PHONE_NUMBER_ID', 'META_APP_SECRET', // Fase 1
-  // 'ANTHROPIC_API_KEY', // Fase 2
-  // 'JWT_SECRET', // Fase 5
-];
+const nodeEnv = process.env.NODE_ENV || 'development';
+const whatsappMode = process.env.WHATSAPP_MODE || 'real';
+const aiMode = process.env.AI_MODE || 'real';
+
+const REQUIRED = ['DATABASE_URL'];
+if (nodeEnv === 'production') {
+  REQUIRED.push('JWT_SECRET', 'FRONTEND_URL');
+  if (whatsappMode === 'real') {
+    REQUIRED.push('META_VERIFY_TOKEN', 'META_ACCESS_TOKEN', 'META_PHONE_NUMBER_ID', 'META_APP_SECRET');
+  }
+  if (aiMode === 'real') REQUIRED.push('ANTHROPIC_API_KEY');
+}
 
 const missing = REQUIRED.filter((key) => !process.env[key]);
 if (missing.length > 0) {
@@ -20,10 +24,33 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+if (!['real', 'mock'].includes(whatsappMode)) {
+  throw new Error('WHATSAPP_MODE debe ser "real" o "mock"');
+}
+if (!['real', 'mock'].includes(aiMode)) {
+  throw new Error('AI_MODE debe ser "real" o "mock"');
+}
+if (nodeEnv === 'production' && process.env.JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET debe tener al menos 32 caracteres en producción');
+}
+
+if (nodeEnv === 'production') {
+  const origins = process.env.FRONTEND_URL.split(',').map((value) => value.trim()).filter(Boolean);
+  if (origins.some((origin) => {
+    try {
+      return new URL(origin).origin !== origin;
+    } catch {
+      return true;
+    }
+  })) {
+    throw new Error('FRONTEND_URL debe contener orígenes HTTPS válidos, sin ruta ni slash final');
+  }
+}
+
 // Config validada y con valores por defecto seguros para lo opcional.
 const env = {
   PORT: parseInt(process.env.PORT, 10) || 3001,
-  NODE_ENV: process.env.NODE_ENV || 'development',
+  NODE_ENV: nodeEnv,
   DATABASE_URL: process.env.DATABASE_URL,
 
   META_VERIFY_TOKEN: process.env.META_VERIFY_TOKEN,
@@ -31,12 +58,12 @@ const env = {
   META_PHONE_NUMBER_ID: process.env.META_PHONE_NUMBER_ID,
   META_APP_SECRET: process.env.META_APP_SECRET,
   // 'real' llama a la Graph API de Meta; 'mock' solo loguea (desarrollo sin tokens).
-  WHATSAPP_MODE: process.env.WHATSAPP_MODE || 'real',
+  WHATSAPP_MODE: whatsappMode,
 
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
   // 'real' llama a la API de Anthropic; 'mock' devuelve una respuesta fija (dev/pruebas sin gastar tokens).
-  AI_MODE: process.env.AI_MODE || 'real',
+  AI_MODE: aiMode,
 
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',

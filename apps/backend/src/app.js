@@ -10,6 +10,8 @@ const { asyncHandler, errorHandler } = require('./middlewares/errorHandler');
 // Construye la app de Express sin ponerla a escuchar (facilita pruebas con supertest).
 function createApp() {
   const app = express();
+  // Railway actúa como proxy; confiar en el primer salto permite usar la IP real para rate limiting.
+  app.set('trust proxy', 1);
 
   // CORS para el panel web (frontend en otro origen). El webhook de Meta no lo necesita.
   app.use(corsMiddleware);

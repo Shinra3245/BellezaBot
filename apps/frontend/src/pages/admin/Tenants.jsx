@@ -54,9 +54,9 @@ export default function Tenants() {
       {showNew && (
         <form className="card form" onSubmit={createBusiness}>
           <input placeholder="Nombre del negocio" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-          <input placeholder="WhatsApp del negocio (+52...)" value={form.wa_phone} onChange={(e) => setForm({ ...form, wa_phone: e.target.value })} required />
+          <input placeholder="WhatsApp del negocio (+52...)" value={form.wa_phone} onChange={(e) => setForm({ ...form, wa_phone: e.target.value })} pattern="\+[1-9][0-9]{7,14}" required />
           <input type="email" placeholder="Correo de la dueña" value={form.ownerEmail} onChange={(e) => setForm({ ...form, ownerEmail: e.target.value })} required />
-          <input type="text" placeholder="Contraseña inicial" value={form.ownerPassword} onChange={(e) => setForm({ ...form, ownerPassword: e.target.value })} required />
+          <input type="password" minLength="16" autoComplete="new-password" placeholder="Contraseña inicial (mínimo 16 caracteres)" value={form.ownerPassword} onChange={(e) => setForm({ ...form, ownerPassword: e.target.value })} required />
           {error && <p className="error">{error}</p>}
           <button className="btn-primary" type="submit">Crear negocio + dueña</button>
         </form>
