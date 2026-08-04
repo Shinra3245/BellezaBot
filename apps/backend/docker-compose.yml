@@ -19,5 +19,23 @@ services:
       timeout: 5s
       retries: 10
 
+  db-test:
+    image: postgres:16-alpine
+    container_name: bellezabot-db-test
+    environment:
+      POSTGRES_USER: bellezabot_test
+      POSTGRES_PASSWORD: bellezabot_test
+      POSTGRES_DB: bellezabot_test
+    ports:
+      - "5434:5432"
+    volumes:
+      - bellezabot_test_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bellezabot_test -d bellezabot_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   bellezabot_pgdata:
+  bellezabot_test_pgdata:

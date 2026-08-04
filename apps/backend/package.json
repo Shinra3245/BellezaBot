@@ -8,8 +8,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test --test-concurrency=1",
-    "db:setup": "node scripts/db-setup.js"
+    "test": "node --require ./tests/setup-env.js --test --test-concurrency=1",
+    "db:setup": "node scripts/db-setup.js",
+    "db:test:setup": "node scripts/db-test-setup.js"
   },
   "engines": {
     "node": ">=20"
