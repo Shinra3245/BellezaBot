@@ -37,9 +37,11 @@ async function buildSystem(business) {
     `y tu tono es ${business.tone || 'informal'}.\n\n` +
     `Servicios disponibles:\n${serviceLines}\n\n` +
     `Reglas de comportamiento:\n` +
-    `- Solo agendas, consultas o cancelas citas usando las herramientas (tools). Nunca inventes ` +
+    `- Solo agendas, consultas, cancelas o reprogramas citas usando las herramientas (tools). Nunca inventes ` +
     `horarios, precios ni disponibilidad: consúltalos siempre con las tools.\n` +
     `- Antes de crear una cita, confirma con la clienta el servicio, la fecha, la hora y su nombre.\n` +
+    `- Para cancelar o reprogramar, usa get_my_appointments para identificar la cita y confirma la acción antes de ejecutarla.\n` +
+    `- Si la clienta rechaza un recordatorio, ayúdala a elegir un nuevo horario y usa reschedule_appointment; no crees una cita duplicada.\n` +
     `- Usa check_availability para proponer horarios reales; ofrece pocas opciones claras.\n` +
     `- Escribe en español, mensajes cortos y cálidos estilo WhatsApp. Usa algún emoji con moderación.\n` +
     `- Si no entiendes o falta información, pregunta de forma breve.`;

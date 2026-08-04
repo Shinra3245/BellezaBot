@@ -11,6 +11,73 @@ const MAX_SLOTS = 6; // máximo de opciones a ofrecer
 
 const ACTIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 
+function validateBookingWindow(startsAt, timezone) {
+  const now = time.nowInZone(timezone);
+  if (startsAt < now.plus({ minutes: MIN_LEAD_MINUTES })) return 'muy_pronto';
+
+  const daysAhead = startsAt.startOf('day').diff(now.startOf('day'), 'days').days;
+  if (daysAhead > MAX_DAYS_AHEAD) return 'fecha_fuera_de_ventana';
+  return null;
+}
+
+function fitsConfiguredSchedule(startsAt, endsAt, schedules, durationMinutes) {
+  const dayStart = startsAt.startOf('day');
+  const stepMinutes = durationMinutes + BUFFER_MINUTES;
+
+  return schedules.some((schedule) => {
+    const windowStart = time.atTime(dayStart, schedule.start_time);
+    const windowEnd = time.atTime(dayStart, schedule.end_time);
+    const offsetMinutes = startsAt.diff(windowStart, 'minutes').minutes;
+    const aligned =
+      offsetMinutes >= 0 && Math.abs(offsetMinutes / stepMinutes - Math.round(offsetMinutes / stepMinutes)) < 1e-8;
+    return aligned && endsAt <= windowEnd;
+  });
+}
+
+// Debe ejecutarse después de adquirir el advisory lock del negocio.
+async function validateSlotInTransaction(
+  client,
+  { businessId, startsAt, endsAt, durationMinutes, excludeAppointmentId = null }
+) {
+  const dayOfWeek = time.jsDayOfWeek(startsAt);
+  const { rows: schedules } = await client.query(
+    `SELECT start_time, end_time FROM schedules
+     WHERE business_id = $1 AND day_of_week = $2
+     ORDER BY start_time`,
+    [businessId, dayOfWeek]
+  );
+
+  if (!fitsConfiguredSchedule(startsAt, endsAt, schedules, durationMinutes)) {
+    return 'fuera_de_horario';
+  }
+
+  const appointmentParams = [businessId, ACTIVE_STATUSES, startsAt.toISO(), endsAt.toISO()];
+  let exclusion = '';
+  if (excludeAppointmentId) {
+    appointmentParams.push(excludeAppointmentId);
+    exclusion = `AND id <> $${appointmentParams.length}`;
+  }
+
+  const { rows: appointmentConflicts } = await client.query(
+    `SELECT 1 FROM appointments
+     WHERE business_id = $1 AND status = ANY($2) ${exclusion}
+       AND starts_at < $4 AND ends_at > $3
+     LIMIT 1`,
+    appointmentParams
+  );
+  if (appointmentConflicts.length > 0) return 'slot_ocupado';
+
+  const { rows: blockConflicts } = await client.query(
+    `SELECT 1 FROM blocks
+     WHERE business_id = $1 AND starts_at < $3 AND ends_at > $2
+     LIMIT 1`,
+    [businessId, startsAt.toISO(), endsAt.toISO()]
+  );
+  if (blockConflicts.length > 0) return 'slot_bloqueado';
+
+  return null;
+}
+
 // Carga un servicio activo del negocio (aísla por business_id).
 async function getService(businessId, serviceId) {
   const { rows } = await db.query(
@@ -135,8 +202,8 @@ async function createAppointment({ businessId, clientPhone, serviceId, datetimeI
   if (!startsAt.isValid) return { error: 'fecha_invalida' };
   const endsAt = startsAt.plus({ minutes: service.duration_minutes });
 
-  const now = time.nowInZone(timezone);
-  if (startsAt < now.plus({ minutes: MIN_LEAD_MINUTES })) return { error: 'muy_pronto' };
+  const windowError = validateBookingWindow(startsAt, timezone);
+  if (windowError) return { error: windowError };
 
   const client = await db.pool.connect();
   try {
@@ -144,16 +211,15 @@ async function createAppointment({ businessId, clientPhone, serviceId, datetimeI
     // Serializa la creación de citas por negocio para revalidar sin carreras.
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [businessId]);
 
-    const { rows: conflicts } = await client.query(
-      `SELECT 1 FROM appointments
-       WHERE business_id = $1 AND status = ANY($2)
-         AND starts_at < $4 AND ends_at > $3
-       LIMIT 1`,
-      [businessId, ACTIVE_STATUSES, startsAt.toISO(), endsAt.toISO()]
-    );
-    if (conflicts.length > 0) {
+    const slotError = await validateSlotInTransaction(client, {
+      businessId,
+      startsAt,
+      endsAt,
+      durationMinutes: service.duration_minutes,
+    });
+    if (slotError) {
       await client.query('ROLLBACK');
-      return { error: 'slot_ocupado' };
+      return { error: slotError };
     }
 
     const { rows } = await client.query(
@@ -233,17 +299,39 @@ async function getAppointmentsByDate({ businessId, date, timezone }) {
 }
 
 // Carga una cita futura del negocio (con datos para notificar a la clienta).
-async function getFutureAppointment(businessId, appointmentId) {
+async function getFutureAppointment(businessId, appointmentId, clientPhone = null) {
   const { rows } = await db.query(
     `SELECT a.id, a.client_name, a.client_phone, a.starts_at, a.service_id, a.status,
             s.name AS service_name, s.duration_minutes
      FROM appointments a
      JOIN services s ON s.id = a.service_id
      WHERE a.id = $1 AND a.business_id = $2
-       AND a.starts_at > now() AND a.status = ANY($3)`,
-    [appointmentId, businessId, ACTIVE_STATUSES]
+       AND ($3::text IS NULL OR a.client_phone = $3)
+       AND a.starts_at > now() AND a.status = ANY($4)`,
+    [appointmentId, businessId, clientPhone, ACTIVE_STATUSES]
   );
   return rows[0] || null;
+}
+
+// Próximas citas activas de una clienta. Le permite identificar una cita sin conocer su UUID.
+async function getUpcomingAppointments({ businessId, clientPhone, timezone, limit = 10 }) {
+  const { rows } = await db.query(
+    `SELECT a.id, a.starts_at, a.status, s.name AS service_name
+     FROM appointments a
+     JOIN services s ON s.id = a.service_id
+     WHERE a.business_id = $1 AND a.client_phone = $2
+       AND a.starts_at > now() AND a.status = ANY($3)
+     ORDER BY a.starts_at
+     LIMIT $4`,
+    [businessId, clientPhone, ACTIVE_STATUSES, limit]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    serviceName: row.service_name,
+    status: row.status,
+    whenLabel: time.formatDateTime(time.DateTime.fromJSDate(row.starts_at).setZone(timezone)),
+    startsAt: row.starts_at,
+  }));
 }
 
 /**
@@ -274,43 +362,52 @@ async function cancelAppointmentAdmin({ businessId, appointmentId }) {
  * (mismo lock por negocio que createAppointment; excluye la propia cita del conflicto).
  * @returns datos para notificar a la clienta o un error.
  */
-async function rescheduleAppointmentAdmin({ businessId, appointmentId, newDatetimeIso, timezone }) {
-  const appt = await getFutureAppointment(businessId, appointmentId);
+async function rescheduleAppointment({
+  businessId,
+  appointmentId,
+  newDatetimeIso,
+  timezone,
+  clientPhone = null,
+}) {
+  const appt = await getFutureAppointment(businessId, appointmentId, clientPhone);
   if (!appt) return { error: 'cita_no_encontrada' };
 
   const startsAt = time.parseISO(newDatetimeIso, timezone);
   if (!startsAt.isValid) return { error: 'fecha_invalida' };
   const endsAt = startsAt.plus({ minutes: appt.duration_minutes });
 
-  const now = time.nowInZone(timezone);
-  if (startsAt < now.plus({ minutes: MIN_LEAD_MINUTES })) return { error: 'muy_pronto' };
+  const windowError = validateBookingWindow(startsAt, timezone);
+  if (windowError) return { error: windowError };
 
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [businessId]);
 
-    // Conflicto contra otras citas activas (excluye la que se está reprogramando) y bloqueos.
-    const { rows: conflicts } = await client.query(
-      `SELECT 1 FROM appointments
-       WHERE business_id = $1 AND status = ANY($2) AND id <> $5
-         AND starts_at < $4 AND ends_at > $3
-       UNION ALL
-       SELECT 1 FROM blocks
-       WHERE business_id = $1 AND starts_at < $4 AND ends_at > $3
-       LIMIT 1`,
-      [businessId, ACTIVE_STATUSES, startsAt.toISO(), endsAt.toISO(), appointmentId]
-    );
-    if (conflicts.length > 0) {
+    const slotError = await validateSlotInTransaction(client, {
+      businessId,
+      startsAt,
+      endsAt,
+      durationMinutes: appt.duration_minutes,
+      excludeAppointmentId: appointmentId,
+    });
+    if (slotError) {
       await client.query('ROLLBACK');
-      return { error: 'slot_ocupado' };
+      return { error: slotError };
     }
 
-    await client.query(
+    const { rows: updated } = await client.query(
       `UPDATE appointments SET starts_at = $1, ends_at = $2, status = 'rescheduled', reminder_sent_at = NULL
-       WHERE id = $3 AND business_id = $4`,
-      [startsAt.toISO(), endsAt.toISO(), appointmentId, businessId]
+       WHERE id = $3 AND business_id = $4
+         AND ($5::text IS NULL OR client_phone = $5)
+         AND starts_at > now() AND status = ANY($6)
+       RETURNING id`,
+      [startsAt.toISO(), endsAt.toISO(), appointmentId, businessId, clientPhone, ACTIVE_STATUSES]
     );
+    if (updated.length === 0) {
+      await client.query('ROLLBACK');
+      return { error: 'cita_no_encontrada' };
+    }
     await client.query('COMMIT');
 
     return {
@@ -328,6 +425,14 @@ async function rescheduleAppointmentAdmin({ businessId, appointmentId, newDateti
   }
 }
 
+async function rescheduleAppointmentAdmin(args) {
+  return rescheduleAppointment(args);
+}
+
+async function rescheduleAppointmentClient(args) {
+  return rescheduleAppointment(args);
+}
+
 /**
  * Crea un bloqueo de horario (rango no disponible) que check_availability respeta.
  */
@@ -338,15 +443,39 @@ async function createBlock({ businessId, date, startTime, endTime, reason, timez
   const endsAt = time.atTime(dayStart, endTime);
   if (!startsAt.isValid || !endsAt.isValid || endsAt <= startsAt) return { error: 'rango_invalido' };
 
-  const { rows } = await db.query(
-    `INSERT INTO blocks (business_id, starts_at, ends_at, reason)
-     VALUES ($1, $2, $3, $4) RETURNING id`,
-    [businessId, startsAt.toISO(), endsAt.toISO(), reason || null]
-  );
-  return {
-    id: rows[0].id,
-    whenLabel: `${time.formatDateTime(startsAt)} a ${time.formatTime(endsAt)}`,
-  };
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [businessId]);
+
+    const { rows: conflicts } = await client.query(
+      `SELECT 1 FROM appointments
+       WHERE business_id = $1 AND status = ANY($2)
+         AND starts_at < $4 AND ends_at > $3
+       LIMIT 1`,
+      [businessId, ACTIVE_STATUSES, startsAt.toISO(), endsAt.toISO()]
+    );
+    if (conflicts.length > 0) {
+      await client.query('ROLLBACK');
+      return { error: 'hay_citas_en_el_rango' };
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO blocks (business_id, starts_at, ends_at, reason)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [businessId, startsAt.toISO(), endsAt.toISO(), reason || null]
+    );
+    await client.query('COMMIT');
+    return {
+      id: rows[0].id,
+      whenLabel: `${time.formatDateTime(startsAt)} a ${time.formatTime(endsAt)}`,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -381,9 +510,11 @@ module.exports = {
   getAvailability,
   createAppointment,
   cancelAppointment,
+  getUpcomingAppointments,
   getAppointmentsByDate,
   cancelAppointmentAdmin,
   rescheduleAppointmentAdmin,
+  rescheduleAppointmentClient,
   createBlock,
   getWeekSummary,
   MIN_LEAD_MINUTES,

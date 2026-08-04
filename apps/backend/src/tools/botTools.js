@@ -41,6 +41,12 @@ const definitions = [
     },
   },
   {
+    name: 'get_my_appointments',
+    description:
+      'Devuelve las próximas citas activas de esta clienta, con su ID, servicio y fecha. Úsala antes de cancelar o reprogramar cuando no conozcas el ID.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
     name: 'cancel_appointment',
     description: 'Cancela una cita futura de la propia clienta, identificada por su ID.',
     input_schema: {
@@ -49,6 +55,20 @@ const definitions = [
         appointment_id: { type: 'string', description: 'ID de la cita a cancelar' },
       },
       required: ['appointment_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'reschedule_appointment',
+    description:
+      'Reprograma una cita futura de esta clienta a un slot previamente devuelto por check_availability. Úsala solo después de confirmar la nueva fecha y hora.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        appointment_id: { type: 'string', description: 'ID obtenido con get_my_appointments' },
+        new_datetime_iso: { type: 'string', description: 'Nuevo inicio ISO 8601 obtenido con check_availability' },
+      },
+      required: ['appointment_id', 'new_datetime_iso'],
       additionalProperties: false,
     },
   },
@@ -106,6 +126,22 @@ async function execute(name, input, ctx) {
       });
     }
 
+    case 'get_my_appointments': {
+      const appointments = await appointmentService.getUpcomingAppointments({
+        businessId,
+        clientPhone: ctx.clientPhone,
+        timezone,
+      });
+      return JSON.stringify({
+        citas: appointments.map((appointment) => ({
+          cita_id: appointment.id,
+          servicio: appointment.serviceName,
+          cuando: appointment.whenLabel,
+          estado: appointment.status,
+        })),
+      });
+    }
+
     case 'cancel_appointment': {
       const res = await appointmentService.cancelAppointment({
         businessId,
@@ -114,6 +150,18 @@ async function execute(name, input, ctx) {
       });
       if (res.error) return JSON.stringify({ error: res.error });
       return JSON.stringify({ ok: true, cancelada: res.id });
+    }
+
+    case 'reschedule_appointment': {
+      const res = await appointmentService.rescheduleAppointmentClient({
+        businessId,
+        clientPhone: ctx.clientPhone,
+        appointmentId: input.appointment_id,
+        newDatetimeIso: input.new_datetime_iso,
+        timezone,
+      });
+      if (res.error) return JSON.stringify({ error: res.error });
+      return JSON.stringify({ ok: true, cita_id: res.id, nuevo_horario: res.whenLabel });
     }
 
     default:
