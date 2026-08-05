@@ -100,3 +100,46 @@ CREATE INDEX idx_appointments_reminders ON appointments (starts_at) WHERE status
 CREATE INDEX idx_messages_conversation ON messages (conversation_id, created_at);
 CREATE INDEX idx_conversations_lookup ON conversations (business_id, client_phone);
 CREATE INDEX idx_blocks_business_date ON blocks (business_id, starts_at);
+
+-- Seguridad de la Data API de Supabase.
+-- El navegador nunca accede directamente a estas tablas: todo pasa por el backend.
+-- El rol PostgreSQL propietario que usa el backend conserva su acceso, mientras que
+-- los roles públicos de Supabase quedan sin acceso directo.
+ALTER TABLE businesses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE services ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE appointments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE blocks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+
+-- PUBLIC es un rol implícito de PostgreSQL; retirar solo anon/authenticated no basta
+-- si PUBLIC todavía puede usar el esquema.
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+
+-- Los roles anon/authenticated existen en Supabase, pero no necesariamente en la
+-- base PostgreSQL local usada para desarrollo.
+DO $security$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM anon';
+    EXECUTE 'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon';
+    EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon';
+    EXECUTE 'REVOKE USAGE ON SCHEMA public FROM anon';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM anon';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM anon';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM authenticated';
+    EXECUTE 'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM authenticated';
+    EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM authenticated';
+    EXECUTE 'REVOKE USAGE ON SCHEMA public FROM authenticated';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM authenticated';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM authenticated';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM authenticated';
+  END IF;
+END
+$security$;
