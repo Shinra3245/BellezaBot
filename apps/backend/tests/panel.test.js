@@ -203,6 +203,14 @@ test('crear y eliminar un horario', async () => {
   assert.strictEqual(del.status, 200);
 });
 
+test('rechaza un horario exactamente duplicado', async () => {
+  const duplicate = await request(app).post('/panel/schedules')
+    .set('Authorization', `Bearer ${tokenOwnerP}`)
+    .send({ day_of_week: 1, start_time: '10:00', end_time: '19:00' });
+  assert.strictEqual(duplicate.status, 409);
+  assert.strictEqual(duplicate.body.error, 'Ese horario ya existe');
+});
+
 test('rechaza horarios invertidos o con formato inválido', async () => {
   const inverted = await request(app).post('/panel/schedules')
     .set('Authorization', `Bearer ${tokenOwnerP}`)

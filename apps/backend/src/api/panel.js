@@ -124,11 +124,13 @@ router.post('/schedules', asyncHandler(async (req, res) => {
   if (!validation.isValidTime(start_time) || !validation.isValidTime(end_time) || start_time >= end_time) {
     throw httpError(400, 'El horario debe tener formato HH:MM y la hora final debe ser posterior');
   }
-  res.status(201).json({
-    schedule: await panelService.createSchedule(bid(req), {
-      day_of_week: Number(day_of_week), start_time, end_time,
-    }),
+  const schedule = await panelService.createSchedule(bid(req), {
+    day_of_week: Number(day_of_week), start_time, end_time,
   });
+  if (schedule.error === 'duplicado') {
+    throw httpError(409, 'Ese horario ya existe');
+  }
+  res.status(201).json({ schedule });
 }));
 
 router.delete('/schedules/:id', asyncHandler(async (req, res) => {

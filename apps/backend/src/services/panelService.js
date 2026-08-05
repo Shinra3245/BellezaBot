@@ -67,12 +67,19 @@ async function listSchedules(businessId) {
 }
 
 async function createSchedule(businessId, { day_of_week, start_time, end_time }) {
-  const { rows } = await db.query(
-    `INSERT INTO schedules (business_id, day_of_week, start_time, end_time)
-     VALUES ($1, $2, $3, $4) RETURNING id, day_of_week, start_time, end_time`,
-    [businessId, day_of_week, start_time, end_time]
-  );
-  return rows[0];
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO schedules (business_id, day_of_week, start_time, end_time)
+       VALUES ($1, $2, $3, $4) RETURNING id, day_of_week, start_time, end_time`,
+      [businessId, day_of_week, start_time, end_time]
+    );
+    return rows[0];
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'schedules_business_day_time_key') {
+      return { error: 'duplicado' };
+    }
+    throw err;
+  }
 }
 
 async function deleteSchedule(businessId, scheduleId) {

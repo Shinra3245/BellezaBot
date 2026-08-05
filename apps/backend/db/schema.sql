@@ -44,7 +44,9 @@ CREATE TABLE schedules (
   business_id UUID NOT NULL REFERENCES businesses(id),
   day_of_week INT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6), -- 0=Domingo (convención JS Date.getDay())
   start_time TIME NOT NULL,
-  end_time TIME NOT NULL
+  end_time TIME NOT NULL,
+  CONSTRAINT schedules_business_day_time_key
+    UNIQUE (business_id, day_of_week, start_time, end_time)
 );
 
 -- Citas
