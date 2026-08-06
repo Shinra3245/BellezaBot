@@ -181,6 +181,10 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
   let availabilityDateNeedsCorrection = false;
   const requestedExactTime = !isAdmin ? getRequestedExactTime(history) : null;
+  const exactAvailabilityRequired = Boolean(
+    requestedExactTime && isAvailabilityCheckTurn(history)
+  );
+  let exactAvailabilityChecked = false;
   const appointmentConfirmationRequired = !isAdmin && isAppointmentConfirmationTurn(history);
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
@@ -228,6 +232,9 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             } catch {
               parsedResult = null;
             }
+            exactAvailabilityChecked = Boolean(
+              requestedExactTime && parsedResult?.hora_solicitada === requestedExactTime
+            );
             availabilityDateNeedsCorrection = parsedResult?.nota === 'fecha_pasada';
             if (
               requestedExactTime &&
@@ -336,6 +343,17 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       });
       continue;
     }
+    if (exactAvailabilityRequired && !exactAvailabilityChecked) {
+      messages.push({ role: 'assistant', content: resp.content });
+      messages.push({
+        role: 'user',
+        content:
+          `Corrección interna obligatoria: la clienta solicitó exactamente las ${requestedExactTime}, ` +
+          `pero no ejecutaste check_availability para esa hora en este turno. Ejecuta la tool ahora ` +
+          `con preferred_time=${requestedExactTime} antes de pedir el nombre o afirmar que está disponible.`,
+      });
+      continue;
+    }
     // Esta barrera pertenece solo al flujo de clientas. En modo admin es normal describir
     // una cita existente con estado "confirmada" y eso nunca debe activar create_appointment.
     const falseConfirmationClaim = !isAdmin && claimsAppointmentConfirmed(text) && !appointmentCreated;
@@ -417,6 +435,13 @@ function getRequestedExactTime(history) {
   const twentyFourHour = text.match(/\b(?:a\s+las?\s+)?([01]?\d|2[0-3])\s*[:;]\s*([0-5]\d)\b/);
   if (!twentyFourHour) return null;
   return `${String(Number(twentyFourHour[1])).padStart(2, '0')}:${twentyFourHour[2]}`;
+}
+
+function isAvailabilityCheckTurn(history) {
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return false;
+  const text = normalizeForIntent(latestUser.content);
+  return /\b(agend\w*|reserv\w*|cita\w*|disponib\w*|horario\w*|hora\w*)\b/.test(text);
 }
 
 function formatExactTimeUnavailable(requestedTime) {
