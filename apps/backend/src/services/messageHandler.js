@@ -1,6 +1,7 @@
 // Pipeline de procesamiento de un mensaje entrante ya validado y persistido.
 // Fase 2: genera la respuesta con la IA (aiService) usando el historial y las tools.
 const logger = require('../utils/logger');
+const env = require('../config/env');
 const conversationService = require('./conversationService');
 const whatsappService = require('./whatsappService');
 const aiService = require('./aiService');
@@ -8,9 +9,11 @@ const { isSubscriptionActive, SERVICE_UNAVAILABLE_MESSAGE } = require('./subscri
 
 // Mensaje de cortesía si la IA falla (timeout, error de API).
 const AI_FALLBACK_MESSAGE = 'Dame un momento, en breve te atiendo 🙏';
+const RATE_LIMIT_MESSAGE =
+  'Has enviado varios mensajes en poco tiempo. Para proteger el servicio, espera un poco antes de intentarlo nuevamente. 🙏';
 
 // Rate limiting: máximo de mensajes procesados por hora por cliente (protege costos de IA ante spam).
-const MAX_MESSAGES_PER_HOUR = 15;
+const MAX_MESSAGES_PER_HOUR = env.CLIENT_RATE_LIMIT_PER_HOUR;
 
 /**
  * Procesa un mensaje entrante: valida suscripción, genera respuesta con IA, la guarda y la envía.
@@ -35,8 +38,12 @@ async function processInboundMessage({ business, from, conversationId }, deps = 
   if (!isAdmin) {
     const recentCount = await conversationService.countRecentInbound(conversationId, 60);
     if (recentCount > MAX_MESSAGES_PER_HOUR) {
+      const noticeSent = recentCount === MAX_MESSAGES_PER_HOUR + 1;
+      if (noticeSent) {
+        await sendAndStore({ business, from, conversationId, reply: RATE_LIMIT_MESSAGE });
+      }
       logger.warn('Cliente excedió el rate limit; se omite la IA', {
-        business_id: business.id, from, recentCount,
+        business_id: business.id, from, recentCount, limit: MAX_MESSAGES_PER_HOUR, noticeSent,
       });
       return;
     }
@@ -72,4 +79,4 @@ function isOwner(business, from) {
   return whatsappService.normalizeRecipient(from) === whatsappService.normalizeRecipient(business.owner_phone);
 }
 
-module.exports = { processInboundMessage, AI_FALLBACK_MESSAGE, isOwner };
+module.exports = { processInboundMessage, AI_FALLBACK_MESSAGE, RATE_LIMIT_MESSAGE, isOwner };

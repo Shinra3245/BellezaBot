@@ -6,6 +6,16 @@ const nodeEnv = process.env.NODE_ENV || 'development';
 const whatsappMode = process.env.WHATSAPP_MODE || 'real';
 const aiMode = process.env.AI_MODE || 'real';
 
+function positiveIntegerFromEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} debe ser un número entero mayor que cero`);
+  }
+  return value;
+}
+
 const REQUIRED = ['DATABASE_URL'];
 if (nodeEnv === 'production') {
   REQUIRED.push('JWT_SECRET', 'FRONTEND_URL');
@@ -64,6 +74,8 @@ const env = {
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
   // 'real' llama a la API de Anthropic; 'mock' devuelve una respuesta fija (dev/pruebas sin gastar tokens).
   AI_MODE: aiMode,
+
+  CLIENT_RATE_LIMIT_PER_HOUR: positiveIntegerFromEnv('CLIENT_RATE_LIMIT_PER_HOUR', 30),
 
   JWT_SECRET: process.env.JWT_SECRET,
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',

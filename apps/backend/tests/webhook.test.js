@@ -4,6 +4,7 @@ process.env.AI_MODE = 'mock';
 process.env.META_VERIFY_TOKEN = 'test-verify-token';
 process.env.META_APP_SECRET = 'test-app-secret';
 process.env.NODE_ENV = 'test';
+process.env.CLIENT_RATE_LIMIT_PER_HOUR = '3';
 
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
@@ -12,7 +13,7 @@ const request = require('supertest');
 const { createApp } = require('../src/app');
 const db = require('../src/config/db');
 const whatsappService = require('../src/services/whatsappService');
-const { processInboundMessage } = require('../src/services/messageHandler');
+const { processInboundMessage, RATE_LIMIT_MESSAGE } = require('../src/services/messageHandler');
 const aiService = require('../src/services/aiService');
 const { SERVICE_UNAVAILABLE_MESSAGE } = require('../src/services/subscriptionService');
 
@@ -206,7 +207,7 @@ test('processInboundMessage con suscripción inactiva envía el mensaje de servi
   assert.strictEqual(whatsappService.sentInMock[0].text, SERVICE_UNAVAILABLE_MESSAGE);
 });
 
-test('rate limiting: cliente que excede 15 mensajes/hora no recibe respuesta de IA', async () => {
+test('rate limiting configurable: avisa una sola vez y no llama a la IA al superar el límite', async () => {
   const business = {
     id: DEMO_BUSINESS_ID,
     wa_phone_number_id: DEMO_PHONE_NUMBER_ID,
@@ -215,19 +216,78 @@ test('rate limiting: cliente que excede 15 mensajes/hora no recibe respuesta de 
   };
   const conversationId = (await db.query(
     `INSERT INTO conversations (business_id, client_phone, channel) VALUES ($1,'testclientRL','whatsapp')
-     ON CONFLICT (business_id, client_phone, channel) DO UPDATE SET last_message_at = now() RETURNING id`,
+    ON CONFLICT (business_id, client_phone, channel) DO UPDATE SET last_message_at = now() RETURNING id`,
     [business.id]
   )).rows[0].id;
-  // 16 mensajes entrantes en la última hora → excede el límite (15).
-  for (let i = 0; i < 16; i++) {
+  // El límite de esta suite es 3. El cuarto mensaje debe recibir una única advertencia.
+  for (let i = 0; i < 4; i++) {
     await db.query(
       `INSERT INTO messages (conversation_id, direction, role, content) VALUES ($1,'inbound','user',$2)`,
       [conversationId, 'spam ' + i]
     );
   }
 
-  await processInboundMessage({ business, from: 'testclientRL', text: 'otro', conversationId });
-  assert.strictEqual(whatsappService.sentInMock.length, 0, 'no debe responder al exceder el rate limit');
+  let aiCalls = 0;
+  const generateReply = async () => {
+    aiCalls += 1;
+    return 'respuesta que no debe enviarse';
+  };
+  await processInboundMessage(
+    { business, from: 'testclientRL', text: 'cuarto', conversationId },
+    { generateReply }
+  );
+  assert.strictEqual(whatsappService.sentInMock.length, 1);
+  assert.strictEqual(whatsappService.sentInMock[0].text, RATE_LIMIT_MESSAGE);
+  assert.strictEqual(aiCalls, 0);
+
+  // El quinto mensaje sigue bloqueado, pero no repite la advertencia.
+  await db.query(
+    `INSERT INTO messages (conversation_id, direction, role, content)
+     VALUES ($1, 'inbound', 'user', 'spam 4')`,
+    [conversationId]
+  );
+  await processInboundMessage(
+    { business, from: 'testclientRL', text: 'quinto', conversationId },
+    { generateReply }
+  );
+  assert.strictEqual(whatsappService.sentInMock.length, 1, 'la advertencia no debe repetirse');
+  assert.strictEqual(aiCalls, 0);
+});
+
+test('la dueña queda exenta del rate limit de clientas', async () => {
+  const ownerPhone = 'testclient5215512345678';
+  const business = {
+    id: DEMO_BUSINESS_ID,
+    wa_phone_number_id: DEMO_PHONE_NUMBER_ID,
+    owner_phone: ownerPhone,
+    is_active: true,
+    subscription_expiry: new Date(Date.now() + 86400000),
+  };
+  const conversationId = (await db.query(
+    `INSERT INTO conversations (business_id, client_phone, channel) VALUES ($1,$2,'whatsapp')
+     ON CONFLICT (business_id, client_phone, channel) DO UPDATE SET last_message_at = now() RETURNING id`,
+    [business.id, ownerPhone]
+  )).rows[0].id;
+  for (let i = 0; i < 4; i++) {
+    await db.query(
+      `INSERT INTO messages (conversation_id, direction, role, content) VALUES ($1,'inbound','user',$2)`,
+      [conversationId, 'mensaje admin ' + i]
+    );
+  }
+
+  let aiCalls = 0;
+  await processInboundMessage(
+    { business, from: ownerPhone, text: 'consulta admin', conversationId },
+    { generateReply: async ({ isAdmin }) => {
+      aiCalls += 1;
+      assert.strictEqual(isAdmin, true);
+      return 'respuesta admin';
+    } }
+  );
+
+  assert.strictEqual(aiCalls, 1);
+  assert.strictEqual(whatsappService.sentInMock.length, 1);
+  assert.strictEqual(whatsappService.sentInMock[0].text, 'respuesta admin');
 });
 
 test('un envío rechazado por Meta no se registra falsamente como outbound', async () => {
