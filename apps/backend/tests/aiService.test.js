@@ -236,7 +236,7 @@ test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con
     },
     {
       stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'Tienes una cita de Prueba agenda admin a las 5:30 p. m.' }],
+      content: [{ type: 'text', text: 'Tienes una cita confirmada de Prueba agenda admin a las 5:30 p. m.' }],
     },
   ]);
 
@@ -253,8 +253,10 @@ test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con
     });
 
     assert.match(reply, /Prueba agenda admin/);
+    assert.match(reply, /cita confirmada/);
     assert.strictEqual(client.calls.length, 5);
     assert.match(client.calls[0].system[0].text, /debes ejecutar get_appointments en el turno actual/);
+    assert.match(client.calls[0].system[0].text, /semana_desde\/semana_hasta/);
     assert.match(client.calls[0].system[1].text, /Fecha actual ISO: \d{4}-\d{2}-\d{2}/);
     assert.ok(
       client.calls[1].messages.some(

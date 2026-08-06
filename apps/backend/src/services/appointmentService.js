@@ -506,7 +506,13 @@ async function getWeekSummary({ businessId, timezone }) {
     byDay[dayLabel] = (byDay[dayLabel] || 0) + 1;
     byStatus[r.status] = (byStatus[r.status] || 0) + 1;
   }
-  return { total: rows.length, byDay, byStatus };
+  return {
+    total: rows.length,
+    byDay,
+    byStatus,
+    from: weekStart.toFormat('yyyy-LL-dd'),
+    to: weekEnd.minus({ days: 1 }).toFormat('yyyy-LL-dd'),
+  };
 }
 
 module.exports = {

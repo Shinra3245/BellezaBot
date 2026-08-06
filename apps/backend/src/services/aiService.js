@@ -86,6 +86,8 @@ async function buildAdminSystem(business) {
     `aunque esperes que el resultado esté vacío. Nunca afirmes que no hay citas sin consultar la tool.\n` +
     `- Si la dueña indica día y mes sin año, usa el año de la fecha actual. Verifica que la fecha enviada a ` +
     `get_appointments coincida exactamente con la solicitada.\n` +
+    `- Al usar get_week_summary, informa exactamente el rango semana_desde/semana_hasta devuelto por la tool; ` +
+    `no calcules ni inventes esas fechas.\n` +
     `- Antes de CUALQUIER acción destructiva o irreversible (cancelar o reprogramar una cita), ` +
     `confirma explícitamente con la dueña citando los datos ("¿Cancelo la cita de María de las 4 PM? Sí/No") ` +
     `y solo ejecuta la tool cuando ella confirme.\n` +
@@ -233,7 +235,9 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       });
       continue;
     }
-    const falseConfirmationClaim = claimsAppointmentConfirmed(text) && !appointmentCreated;
+    // Esta barrera pertenece solo al flujo de clientas. En modo admin es normal describir
+    // una cita existente con estado "confirmada" y eso nunca debe activar create_appointment.
+    const falseConfirmationClaim = !isAdmin && claimsAppointmentConfirmed(text) && !appointmentCreated;
     const missingConfirmedCreation = appointmentConfirmationRequired && !appointmentCreationAttempted;
     if (falseConfirmationClaim || missingConfirmedCreation) {
       messages.push({ role: 'assistant', content: resp.content });

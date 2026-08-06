@@ -196,7 +196,10 @@ test('block_time_slot hace que ese rango deje de ofrecerse a las clientas', asyn
 test('get_week_summary devuelve total y desgloses', async () => {
   const out = await adminTools.execute('get_week_summary', {}, { business: businessA });
   const parsed = JSON.parse(out);
+  const expectedStart = DateTime.now().setZone(TZ).startOf('week');
   assert.ok(typeof parsed.total === 'number');
   assert.ok(parsed.por_dia && typeof parsed.por_dia === 'object');
   assert.ok(parsed.por_estado && typeof parsed.por_estado === 'object');
+  assert.strictEqual(parsed.semana_desde, expectedStart.toFormat('yyyy-LL-dd'));
+  assert.strictEqual(parsed.semana_hasta, expectedStart.plus({ days: 6 }).toFormat('yyyy-LL-dd'));
 });

@@ -161,7 +161,13 @@ async function execute(name, input, ctx) {
 
     case 'get_week_summary': {
       const res = await appointmentService.getWeekSummary({ businessId, timezone });
-      return JSON.stringify({ total: res.total, por_dia: res.byDay, por_estado: res.byStatus });
+      return JSON.stringify({
+        semana_desde: res.from,
+        semana_hasta: res.to,
+        total: res.total,
+        por_dia: res.byDay,
+        por_estado: res.byStatus,
+      });
     }
 
     default:
