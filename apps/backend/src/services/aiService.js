@@ -45,6 +45,8 @@ async function buildSystem(business) {
     `- Para cancelar o reprogramar, usa get_my_appointments para identificar la cita y confirma la acción antes de ejecutarla.\n` +
     `- Si la clienta rechaza un recordatorio, ayúdala a elegir un nuevo horario y usa reschedule_appointment; no crees una cita duplicada.\n` +
     `- Usa check_availability para proponer horarios reales; ofrece pocas opciones claras.\n` +
+    `- Si la clienta solicita una hora exacta, conviértela a HH:MM de 24 horas y envíala como preferred_time ` +
+    `a check_availability. No concluyas que una hora de la tarde está ocupada basándote solo en una lista general.\n` +
     `- Si la clienta menciona día y mes pero omite el año, usa la próxima ocurrencia futura de esa fecha: ` +
     `el año actual si aún no ha pasado o el siguiente si ya pasó. Nunca selecciones un año anterior.\n` +
     `- Si check_availability devuelve fecha_pasada, corrige la fecha y vuelve a ejecutar la tool antes de responder. ` +

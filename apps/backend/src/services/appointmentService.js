@@ -11,6 +11,17 @@ const MAX_SLOTS = 6; // máximo de opciones a ofrecer
 
 const ACTIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 
+// Conserva pocas opciones para WhatsApp, pero distribuidas entre apertura y cierre.
+function selectRepresentativeSlots(slots) {
+  if (slots.length <= MAX_SLOTS) return slots;
+  const selected = [];
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    const index = Math.round((i * (slots.length - 1)) / (MAX_SLOTS - 1));
+    if (!selected.includes(slots[index])) selected.push(slots[index]);
+  }
+  return selected;
+}
+
 function validateBookingWindow(startsAt, timezone) {
   const now = time.nowInZone(timezone);
   if (startsAt < now.plus({ minutes: MIN_LEAD_MINUTES })) return 'muy_pronto';
@@ -130,12 +141,16 @@ async function getOverlappingBlocks(businessId, fromISO, toISO) {
  * Calcula los huecos libres para un día y servicio.
  * @returns {Promise<{ slots: Array<{datetime_iso, label}>, closed: boolean, past: boolean, tooFar: boolean }>}
  */
-async function getAvailability({ businessId, date, serviceId, timezone }) {
+async function getAvailability({ businessId, date, serviceId, timezone, preferredTime = null }) {
   const service = await getService(businessId, serviceId);
   if (!service) return { error: 'servicio_no_encontrado' };
 
   const dayStart = time.startOfDay(date, timezone);
   if (!dayStart.isValid) return { error: 'fecha_invalida' };
+  if (preferredTime !== null && !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(preferredTime)) {
+    return { error: 'hora_invalida' };
+  }
+  const preferredStart = preferredTime ? time.atTime(dayStart, preferredTime) : null;
 
   const now = time.nowInZone(timezone);
   const daysAhead = dayStart.diff(now.startOf('day'), 'days').days;
@@ -184,15 +199,15 @@ async function getAvailability({ businessId, date, serviceId, timezone }) {
         (b) => b.start < slotEnd.toMillis() && b.end > slotStart.toMillis()
       );
 
-      if (!inPast && !overlaps) {
+      const matchesPreferredTime = !preferredStart || slotStart.toMillis() === preferredStart.toMillis();
+      if (!inPast && !overlaps && matchesPreferredTime) {
         slots.push({ datetime_iso: slotStart.toISO(), label: time.formatTime(slotStart) });
-        if (slots.length >= MAX_SLOTS) return { slots };
       }
       slotStart = slotStart.plus({ minutes: duration + BUFFER_MINUTES });
     }
   }
 
-  return { slots };
+  return { slots: preferredStart ? slots : selectRepresentativeSlots(slots) };
 }
 
 /**

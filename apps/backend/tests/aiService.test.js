@@ -93,7 +93,10 @@ test('el system prompt cachea el bloque estable y deja la fecha en un bloque vol
   assert.match(captured.system[1].text, /Fecha actual ISO: \d{4}-\d{2}-\d{2}/);
   assert.match(captured.system[0].text, /próxima ocurrencia futura/);
   assert.match(captured.system[0].text, /fecha_pasada/);
+  assert.match(captured.system[0].text, /preferred_time/);
   assert.match(captured.system[0].text, /create_appointment devolvió/);
+  const availabilityTool = captured.tools.find((tool) => tool.name === 'check_availability');
+  assert.ok(availabilityTool.input_schema.properties.preferred_time);
 });
 
 test('una confirmación verbal no sale hasta que create_appointment guarde realmente la cita', async () => {

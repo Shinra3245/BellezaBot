@@ -25,6 +25,11 @@ const definitions = [
             'Fecha futura en formato YYYY-MM-DD (zona horaria del negocio). Si la clienta omite el año, usa la próxima ocurrencia futura de esa fecha.',
         },
         service_id: { type: 'string', description: 'ID del servicio (de get_service_info)' },
+        preferred_time: {
+          type: 'string',
+          description:
+            'Hora exacta solicitada en HH:MM (24h). Inclúyela siempre que la clienta pida una hora específica, por ejemplo 18:15.',
+        },
       },
       required: ['date', 'service_id'],
       additionalProperties: false,
@@ -104,8 +109,13 @@ async function execute(name, input, ctx) {
         date: input.date,
         serviceId: input.service_id,
         timezone,
+        preferredTime: input.preferred_time || null,
       });
-      const dateContext = { fecha_solicitada: input.date, fecha_actual: currentDate };
+      const dateContext = {
+        fecha_solicitada: input.date,
+        fecha_actual: currentDate,
+        ...(input.preferred_time ? { hora_solicitada: input.preferred_time } : {}),
+      };
       if (res.error) return JSON.stringify({ ...dateContext, error: res.error });
       if (res.past) {
         return JSON.stringify({
@@ -121,6 +131,9 @@ async function execute(name, input, ctx) {
       }
       if (res.closed) {
         return JSON.stringify({ ...dateContext, disponibilidad: [], nota: 'cerrado_ese_dia' });
+      }
+      if (input.preferred_time && res.slots.length === 0) {
+        return JSON.stringify({ ...dateContext, disponibilidad: [], nota: 'hora_no_disponible' });
       }
       return JSON.stringify({
         ...dateContext,
