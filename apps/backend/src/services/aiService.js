@@ -180,6 +180,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   const system = isAdmin ? await buildAdminSystem(business) : await buildSystem(business);
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
   let availabilityDateNeedsCorrection = false;
+  const requestedExactTime = !isAdmin ? getRequestedExactTime(history) : null;
   const appointmentConfirmationRequired = !isAdmin && isAppointmentConfirmationTurn(history);
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
@@ -205,13 +206,21 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
         if (block.type !== 'tool_use') continue;
         let result;
         try {
+          // La hora escrita por la clienta tiene prioridad sobre la interpretación de la IA.
+          // Así una consulta por "6:00 pm" nunca puede degradarse a una lista general del día.
+          const toolInput = block.name === 'check_availability' && requestedExactTime
+            ? { ...block.input, preferred_time: requestedExactTime }
+            : block.input;
           if (block.name === 'check_availability') {
             logger.info('[ai] Consulta de disponibilidad', {
               business_id: business.id,
-              date: block.input?.date,
+              date: toolInput?.date,
+              requested_time: requestedExactTime || undefined,
+              model_preferred_time: block.input?.preferred_time,
+              effective_preferred_time: toolInput?.preferred_time,
             });
           }
-          result = await toolset.execute(block.name, block.input, ctx);
+          result = await toolset.execute(block.name, toolInput, ctx);
           if (block.name === 'check_availability') {
             let parsedResult;
             try {
@@ -220,6 +229,18 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
               parsedResult = null;
             }
             availabilityDateNeedsCorrection = parsedResult?.nota === 'fecha_pasada';
+            if (
+              requestedExactTime &&
+              parsedResult?.hora_solicitada === requestedExactTime &&
+              parsedResult?.nota === 'hora_no_disponible'
+            ) {
+              logger.info('[ai] Hora exacta rechazada por disponibilidad real', {
+                business_id: business.id,
+                date: parsedResult.fecha_solicitada,
+                requested_time: requestedExactTime,
+              });
+              return formatExactTimeUnavailable(requestedExactTime);
+            }
           }
           if (block.name === 'create_appointment') {
             appointmentCreationAttempted = true;
@@ -372,6 +393,40 @@ function normalizeForIntent(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+// Extrae únicamente horas explícitas del último mensaje de la clienta y las normaliza
+// a HH:MM. Acepta formatos comunes de WhatsApp: 6:00 pm, 6:00 p. m. y 18:00.
+function getRequestedExactTime(history) {
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return null;
+  const text = normalizeForIntent(latestUser.content);
+
+  const twelveHour = text.match(
+    /\b(\d{1,2})(?:\s*[:;]\s*([0-5]\d))?\s*([ap])\.?\s*m\.?\b/
+  );
+  if (twelveHour) {
+    let hour = Number(twelveHour[1]);
+    if (hour < 1 || hour > 12) return null;
+    const minute = Number(twelveHour[2] || '00');
+    if (twelveHour[3] === 'a') hour = hour === 12 ? 0 : hour;
+    if (twelveHour[3] === 'p') hour = hour === 12 ? 12 : hour + 12;
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
+
+  const twentyFourHour = text.match(/\b(?:a\s+las?\s+)?([01]?\d|2[0-3])\s*[:;]\s*([0-5]\d)\b/);
+  if (!twentyFourHour) return null;
+  return `${String(Number(twentyFourHour[1])).padStart(2, '0')}:${twentyFourHour[2]}`;
+}
+
+function formatExactTimeUnavailable(requestedTime) {
+  const [hour, minute] = requestedTime.split(':').map(Number);
+  const period = hour < 12 ? 'a. m.' : 'p. m.';
+  const displayHour = hour % 12 || 12;
+  return (
+    `Ese horario (${displayHour}:${String(minute).padStart(2, '0')} ${period}) no está disponible ` +
+    'para ese servicio. ¿Quieres que te muestre otros horarios de ese día? 😊'
+  );
 }
 
 // Reconoce el turno específico en que la clienta acepta la propuesta que el bot acaba de resumir.

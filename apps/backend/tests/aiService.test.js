@@ -99,6 +99,57 @@ test('el system prompt cachea el bloque estable y deja la fecha en un bloque vol
   assert.ok(availabilityTool.input_schema.properties.preferred_time);
 });
 
+test('impone la hora exacta escrita por la clienta y rechaza un empalme aunque la IA la omita', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 18 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const date = appointmentDay.toFormat('yyyy-MM-dd');
+  const clientPhone = 'testclient-ai-exact-overlap';
+
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Manicure previo',
+      appointmentDay.set({ hour: 18, minute: 15 }).toISO(),
+      appointmentDay.set({ hour: 19, minute: 0 }).toISO(),
+    ]
+  );
+
+  // La IA omite preferred_time. El backend debe recuperar 18:00 del mensaje y
+  // consultar esa hora exacta para Pedicure (60 min), que se empalma con 18:15–19:00.
+  const client = fakeClient([{
+    stop_reason: 'tool_use',
+    content: [{
+      type: 'tool_use', id: 'availability-without-time', name: 'check_availability',
+      input: {
+        date,
+        service_id: '22222222-2222-2222-2222-222222222202',
+      },
+    }],
+  }]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone: 'client-requesting-overlap',
+      history: [{
+        role: 'user',
+        content: `Quiero agendar un pedicure el ${date} a las 6;00 p. m.`,
+      }],
+      client,
+    });
+
+    assert.match(reply, /6:00 p\. m\./);
+    assert.match(reply, /no está disponible/);
+    assert.strictEqual(client.calls.length, 1, 'el rechazo real no debe depender de otra respuesta de IA');
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
 test('una confirmación verbal no sale hasta que create_appointment guarde realmente la cita', async () => {
   let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 20 }).startOf('day');
   if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
