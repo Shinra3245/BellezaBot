@@ -484,11 +484,12 @@ async function createBlock({ businessId, date, startTime, endTime, reason, timez
 }
 
 /**
- * Resumen de la semana en curso: conteo de citas por día y por estado.
+ * Resumen de la semana que contiene `date` (o la actual): conteo por día y estado.
  */
-async function getWeekSummary({ businessId, timezone }) {
-  const now = time.nowInZone(timezone);
-  const weekStart = now.startOf('week'); // luxon: lunes
+async function getWeekSummary({ businessId, timezone, date = null }) {
+  const referenceDate = date ? time.startOfDay(date, timezone) : time.nowInZone(timezone);
+  if (!referenceDate.isValid) return { error: 'fecha_invalida' };
+  const weekStart = referenceDate.startOf('week'); // luxon: lunes
   const weekEnd = weekStart.plus({ days: 7 });
 
   const { rows } = await db.query(

@@ -70,8 +70,15 @@ const definitions = [
   },
   {
     name: 'get_week_summary',
-    description: 'Resumen de la semana en curso: total de citas y desglose por día y por estado.',
-    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+    description:
+      'Resumen de la semana que contiene la fecha indicada: total de citas y desglose por día y estado. Si se omite date, usa la semana actual.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Fecha de referencia YYYY-MM-DD dentro de la semana solicitada.' },
+      },
+      additionalProperties: false,
+    },
   },
 ];
 
@@ -160,7 +167,8 @@ async function execute(name, input, ctx) {
     }
 
     case 'get_week_summary': {
-      const res = await appointmentService.getWeekSummary({ businessId, timezone });
+      const res = await appointmentService.getWeekSummary({ businessId, timezone, date: input.date });
+      if (res.error) return JSON.stringify({ error: res.error });
       return JSON.stringify({
         semana_desde: res.from,
         semana_hasta: res.to,

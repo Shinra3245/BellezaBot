@@ -203,3 +203,15 @@ test('get_week_summary devuelve total y desgloses', async () => {
   assert.strictEqual(parsed.semana_desde, expectedStart.toFormat('yyyy-LL-dd'));
   assert.strictEqual(parsed.semana_hasta, expectedStart.plus({ days: 6 }).toFormat('yyyy-LL-dd'));
 });
+
+test('get_week_summary acepta una fecha de la siguiente semana', async () => {
+  const nextWeek = DateTime.now().setZone(TZ).plus({ weeks: 1 }).startOf('week');
+  const out = await adminTools.execute(
+    'get_week_summary',
+    { date: nextWeek.toFormat('yyyy-LL-dd') },
+    { business: businessA }
+  );
+  const parsed = JSON.parse(out);
+  assert.strictEqual(parsed.semana_desde, nextWeek.toFormat('yyyy-LL-dd'));
+  assert.strictEqual(parsed.semana_hasta, nextWeek.plus({ days: 6 }).toFormat('yyyy-LL-dd'));
+});

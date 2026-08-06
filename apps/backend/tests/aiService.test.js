@@ -200,8 +200,6 @@ test('si create_appointment falla, bloquea la confirmación falsa y comunica el 
 test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con una respuesta vacía', async () => {
   let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 12 }).startOf('day');
   if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
-  const correctDate = appointmentDay.toFormat('yyyy-MM-dd');
-  const wrongDate = appointmentDay.minus({ years: 2 }).toFormat('yyyy-MM-dd');
   const monthName = appointmentDay.setLocale('es').toFormat('LLLL');
   const clientPhone = 'testclient-admin-agenda-guard';
   await db.query(
@@ -217,24 +215,7 @@ test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con
     ]
   );
 
-  const client = fakeClient([
-    {
-      stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'Sin citas ese día. 📭' }],
-    },
-    {
-      stop_reason: 'tool_use',
-      content: [{ type: 'tool_use', id: 'wrong-admin-date', name: 'get_appointments', input: { date: wrongDate } }],
-    },
-    {
-      stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'No hay citas para esa fecha.' }],
-    },
-    {
-      stop_reason: 'tool_use',
-      content: [{ type: 'tool_use', id: 'correct-admin-date', name: 'get_appointments', input: { date: correctDate } }],
-    },
-  ]);
+  const client = fakeClient([]);
 
   try {
     const reply = await aiService.generateReply({
@@ -251,58 +232,49 @@ test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con
     assert.match(reply, /Prueba agenda admin/);
     assert.match(reply, /✅ Confirmada/);
     assert.doesNotMatch(reply, /\|/);
-    assert.strictEqual(client.calls.length, 4);
-    assert.match(client.calls[0].system[0].text, /debes ejecutar get_appointments en el turno actual/);
-    assert.match(client.calls[0].system[0].text, /semana_desde\/semana_hasta/);
-    assert.match(client.calls[0].system[1].text, /Fecha actual ISO: \d{4}-\d{2}-\d{2}/);
-    assert.ok(
-      client.calls[1].messages.some(
-        (message) => typeof message.content === 'string' && message.content.includes(`date=${correctDate}`)
-      ),
-      'debe forzar la consulta si la IA responde sin usar la tool'
-    );
-    assert.ok(
-      client.calls[3].messages.some(
-        (message) => typeof message.content === 'string' && message.content.includes(`date=${correctDate}`)
-      ),
-      'debe rechazar una consulta realizada con otro año'
-    );
-    const correctToolResult = client.calls[3].messages
-      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
-      .find((block) => block.type === 'tool_result' && block.tool_use_id === 'correct-admin-date');
-    assert.match(correctToolResult.content, /Prueba agenda admin/);
+    assert.strictEqual(client.calls.length, 0, 'la consulta reconocida no debe depender de Anthropic');
   } finally {
     await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
   }
 });
 
-test('el resumen semanal se consulta y se formatea para móvil sin tablas ni días inventados', async () => {
-  const client = fakeClient([
-    {
-      stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'Resumen inventado sin consultar.' }],
-    },
-    {
-      stop_reason: 'tool_use',
-      content: [{ type: 'tool_use', id: 'week-summary', name: 'get_week_summary', input: {} }],
-    },
-  ]);
+test('la siguiente semana se consulta directamente y se formatea sin tablas ni días inventados', async () => {
+  const client = fakeClient([]);
+  const nextWeekStart = DateTime.now().setZone(business.timezone).plus({ weeks: 1 }).startOf('week');
+  const clientPhone = 'testclient-admin-next-week';
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Cita siguiente semana',
+      nextWeekStart.set({ hour: 10 }).toISO(),
+      nextWeekStart.set({ hour: 10, minute: 45 }).toISO(),
+    ]
+  );
 
-  const reply = await aiService.generateReply({
-    business,
-    clientPhone: 'owner-test',
-    history: [{ role: 'user', content: 'Dame el resumen de citas de esta semana' }],
-    client,
-    isAdmin: true,
-  });
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone: 'owner-test',
+      history: [{ role: 'user', content: 'Dame el resumen de citas de la siguiente semana' }],
+      client,
+      isAdmin: true,
+    });
 
-  const weekStart = DateTime.now().setZone(business.timezone).startOf('week').setLocale('es');
-  const weekEnd = weekStart.plus({ days: 6 });
-  assert.match(reply, /📅 \*Resumen semanal\*/);
-  assert.match(reply, new RegExp(`${weekStart.toFormat('d')}.*${weekEnd.toFormat('d')}`));
-  assert.doesNotMatch(reply, /\|/);
-  assert.doesNotMatch(reply, /Lunes: 0|Martes: 0|Miércoles: 0/);
-  assert.strictEqual(client.calls.length, 2);
+    const weekEnd = nextWeekStart.plus({ days: 6 });
+    assert.match(reply, /📅 \*Resumen semanal\*/);
+    assert.match(reply, new RegExp(`${nextWeekStart.toFormat('d')}.*${weekEnd.toFormat('d')}`));
+    assert.match(reply, /Total: \*1 cita\*/);
+    assert.match(reply, /Lunes: 1 cita/);
+    assert.doesNotMatch(reply, /\|/);
+    assert.doesNotMatch(reply, /Martes: 0|Miércoles: 0/);
+    assert.strictEqual(client.calls.length, 0, 'la consulta semanal reconocida no debe depender de Anthropic');
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
 });
 
 test('no entrega una respuesta de no disponibilidad hasta corregir una fecha pasada', async () => {

@@ -119,20 +119,71 @@ async function buildAdminSystem(business) {
 async function generateReply({ business, clientPhone, history, client, isAdmin = false }) {
   if (env.AI_MODE === 'mock' && !client) return MOCK_REPLY;
 
+  const ctx = { business, clientPhone };
+  const adminExpectedAgendaDate = isAdmin ? getExpectedAdminAgendaDate(history, business.timezone) : null;
+  const adminWeekReferenceDate =
+    isAdmin && !adminExpectedAgendaDate ? getAdminWeekReferenceDate(history, business.timezone) : null;
+
+  // Ruta determinista para lecturas administrativas: evita gastar iteraciones de IA y garantiza
+  // que "esta semana" y "siguiente semana" siempre consulten la base antes de responder.
+  if (adminExpectedAgendaDate) {
+    const rawResult = await adminTools.execute(
+      'get_appointments',
+      { date: adminExpectedAgendaDate },
+      ctx
+    );
+    const parsedResult = parseToolResult(rawResult);
+    if (
+      parsedResult?.fecha === adminExpectedAgendaDate &&
+      Array.isArray(parsedResult?.citas) &&
+      !parsedResult.error
+    ) {
+      logger.info('[ai] Agenda administrativa resuelta directamente', {
+        business_id: business.id,
+        date: adminExpectedAgendaDate,
+        count: parsedResult.citas.length,
+      });
+      return formatAdminDailyAgenda(parsedResult, business.timezone);
+    }
+  }
+
+  if (adminWeekReferenceDate) {
+    const rawResult = await adminTools.execute(
+      'get_week_summary',
+      { date: adminWeekReferenceDate },
+      ctx
+    );
+    const parsedResult = parseToolResult(rawResult);
+    if (
+      typeof parsedResult?.total === 'number' &&
+      parsedResult?.semana_desde &&
+      parsedResult?.semana_hasta &&
+      parsedResult?.por_dia &&
+      parsedResult?.por_estado &&
+      !parsedResult.error
+    ) {
+      logger.info('[ai] Resumen semanal administrativo resuelto directamente', {
+        business_id: business.id,
+        from: parsedResult.semana_desde,
+        to: parsedResult.semana_hasta,
+        count: parsedResult.total,
+      });
+      return formatAdminWeekSummary(parsedResult, business.timezone);
+    }
+  }
+
   const anthropic = client || getClient();
   // Bifurcación cliente/dueña: cambian el system prompt y el set de tools; el motor es el mismo.
   const toolset = isAdmin ? adminTools : botTools;
   const system = isAdmin ? await buildAdminSystem(business) : await buildSystem(business);
-  const ctx = { business, clientPhone };
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
   let availabilityDateNeedsCorrection = false;
   const appointmentConfirmationRequired = !isAdmin && isAppointmentConfirmationTurn(history);
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
   let appointmentCreationError = null;
-  const adminExpectedAgendaDate = isAdmin ? getExpectedAdminAgendaDate(history, business.timezone) : null;
   const adminWeekSummaryRequired =
-    isAdmin && !adminExpectedAgendaDate && isAdminWeekSummaryTurn(history);
+    isAdmin && Boolean(adminWeekReferenceDate);
   let adminAgendaResult = null;
   let adminWeekResult = null;
   let adminDirectReply = null;
@@ -416,6 +467,26 @@ function isAdminWeekSummaryTurn(history) {
     /\bsemana(?:l)?\b/.test(text) && /\b(agenda|citas?|resumen)\b/.test(text) ||
     /\bresumen\b[\s\S]{0,40}\bcitas?\b/.test(text)
   );
+}
+
+function getAdminWeekReferenceDate(history, timezone) {
+  if (!isAdminWeekSummaryTurn(history)) return null;
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  const text = normalizeForIntent(latestUser?.content);
+  let reference = time.nowInZone(timezone);
+  const nextWeek =
+    /\b(siguiente|proxima)\s+semana\b/.test(text) ||
+    /\bsemana\s+(siguiente|proxima)\b/.test(text);
+  if (nextWeek) reference = reference.plus({ weeks: 1 });
+  return reference.startOf('week').toFormat('yyyy-LL-dd');
+}
+
+function parseToolResult(result) {
+  try {
+    return JSON.parse(result);
+  } catch {
+    return null;
+  }
 }
 
 const ADMIN_STATUS_LABELS = {
