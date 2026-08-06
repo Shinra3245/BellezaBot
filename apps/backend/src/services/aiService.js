@@ -40,6 +40,8 @@ async function buildSystem(business) {
     `- Solo agendas, consultas, cancelas o reprogramas citas usando las herramientas (tools). Nunca inventes ` +
     `horarios, precios ni disponibilidad: consúltalos siempre con las tools.\n` +
     `- Antes de crear una cita, confirma con la clienta el servicio, la fecha, la hora y su nombre.\n` +
+    `- Solo puedes decir que una cita quedó confirmada, agendada o reservada si create_appointment devolvió ` +
+    `ok=true en el turno actual. Si la tool devuelve un error, la cita NO existe: explica el problema real y nunca la confirmes.\n` +
     `- Para cancelar o reprogramar, usa get_my_appointments para identificar la cita y confirma la acción antes de ejecutarla.\n` +
     `- Si la clienta rechaza un recordatorio, ayúdala a elegir un nuevo horario y usa reschedule_appointment; no crees una cita duplicada.\n` +
     `- Usa check_availability para proponer horarios reales; ofrece pocas opciones claras.\n` +
@@ -115,6 +117,10 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   const ctx = { business, clientPhone };
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
   let availabilityDateNeedsCorrection = false;
+  const appointmentConfirmationRequired = !isAdmin && isAppointmentConfirmationTurn(history);
+  let appointmentCreationAttempted = false;
+  let appointmentCreated = false;
+  let appointmentCreationError = null;
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const resp = await anthropic.messages.create({
@@ -147,7 +153,31 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             }
             availabilityDateNeedsCorrection = parsedResult?.nota === 'fecha_pasada';
           }
+          if (block.name === 'create_appointment') {
+            appointmentCreationAttempted = true;
+            let parsedResult;
+            try {
+              parsedResult = JSON.parse(result);
+            } catch {
+              parsedResult = null;
+            }
+            if (parsedResult?.ok === true) {
+              appointmentCreated = true;
+              appointmentCreationError = null;
+            } else if (!appointmentCreated) {
+              appointmentCreationError = parsedResult?.error || 'resultado_invalido';
+            }
+            logger.info('[ai] Resultado de creación de cita', {
+              business_id: business.id,
+              ok: parsedResult?.ok === true,
+              error: parsedResult?.ok === true ? undefined : appointmentCreationError,
+            });
+          }
         } catch (err) {
+          if (block.name === 'create_appointment') {
+            appointmentCreationAttempted = true;
+            appointmentCreationError = 'error_interno';
+          }
           logger.error('[ai] Error ejecutando tool', { tool: block.name, error: err.message });
           result = JSON.stringify({ error: 'error_interno' });
         }
@@ -173,12 +203,67 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       });
       continue;
     }
+    const falseConfirmationClaim = claimsAppointmentConfirmed(text) && !appointmentCreated;
+    const missingConfirmedCreation = appointmentConfirmationRequired && !appointmentCreationAttempted;
+    if (falseConfirmationClaim || missingConfirmedCreation) {
+      messages.push({ role: 'assistant', content: resp.content });
+      let correction;
+      if (appointmentConfirmationRequired && !appointmentCreationAttempted) {
+        correction =
+          'Corrección interna obligatoria: la clienta ya confirmó los datos de la cita, pero todavía no ejecutaste create_appointment. Ejecuta esa tool ahora y solo confirma la cita si devuelve ok=true.';
+      } else if (appointmentCreationAttempted && appointmentCreationError) {
+        correction =
+          `Corrección interna obligatoria: create_appointment falló con ${appointmentCreationError}. ` +
+          'La cita no fue creada. Explica ese problema a la clienta y no digas que quedó confirmada, agendada o reservada.';
+      } else {
+        correction =
+          'Corrección interna obligatoria: no existe un create_appointment exitoso en este turno. No afirmes que la cita quedó confirmada; solicita la confirmación explícita que falte antes de crearla.';
+      }
+      messages.push({ role: 'user', content: correction });
+      continue;
+    }
     return text || 'Perdona, ¿me lo repites? 🙏';
   }
 
   // Se agotaron las iteraciones de tools sin respuesta final.
   logger.warn('[ai] Límite de iteraciones de tool_use alcanzado', { business_id: business.id });
   return 'Dame un momento, en breve te atiendo 🙏';
+}
+
+function normalizeForIntent(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+// Reconoce el turno específico en que la clienta acepta la propuesta que el bot acaba de resumir.
+function isAppointmentConfirmationTurn(history) {
+  const latestUserIndex = history.map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex < 0) return false;
+
+  const latestUser = normalizeForIntent(history[latestUserIndex].content);
+  const affirmative =
+    /\bconfirmo\b/.test(latestUser) ||
+    /^(si|correcto|adelante|de acuerdo|ok|okay|vale)(\b|[,.!])/u.test(latestUser);
+  if (!affirmative) return false;
+
+  for (let i = latestUserIndex - 1; i >= 0; i--) {
+    if (history[i].role !== 'assistant') continue;
+    const previousAssistant = normalizeForIntent(history[i].content);
+    return /\bcita\b/.test(previousAssistant) && /\bconfirm(?:o|ar|as|acion)\b/.test(previousAssistant);
+  }
+  return false;
+}
+
+// Segunda barrera: aunque el modelo ignore el flujo, una confirmación falsa nunca sale a WhatsApp.
+function claimsAppointmentConfirmed(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    /\b(cita|reservacion|turno)\b[\s\S]{0,100}\b(confirmad[ao]|agendad[ao]|reservad[ao])\b/.test(normalized) ||
+    /\b(confirmad[ao]|agendad[ao]|reservad[ao])\b[\s\S]{0,100}\b(cita|reservacion|turno)\b/.test(normalized)
+  );
 }
 
 module.exports = { generateReply, MOCK_REPLY };

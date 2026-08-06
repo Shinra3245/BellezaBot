@@ -137,9 +137,10 @@ async function execute(name, input, ctx) {
         clientName: input.client_name,
         timezone,
       });
-      if (res.error) return JSON.stringify({ error: res.error });
+      if (res.error) return JSON.stringify({ ok: false, cita_creada: false, error: res.error });
       return JSON.stringify({
         ok: true,
+        cita_creada: true,
         cita_id: res.id,
         servicio: res.serviceName,
         cuando: res.whenLabel,

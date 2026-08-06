@@ -93,6 +93,108 @@ test('el system prompt cachea el bloque estable y deja la fecha en un bloque vol
   assert.match(captured.system[1].text, /Fecha actual ISO: \d{4}-\d{2}-\d{2}/);
   assert.match(captured.system[0].text, /próxima ocurrencia futura/);
   assert.match(captured.system[0].text, /fecha_pasada/);
+  assert.match(captured.system[0].text, /create_appointment devolvió/);
+});
+
+test('una confirmación verbal no sale hasta que create_appointment guarde realmente la cita', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 20 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const appointmentIso = appointmentDay.set({ hour: 18, minute: 15 }).toISO();
+  const clientPhone = 'testclient-ai-create-guard';
+  const client = fakeClient([
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: '¡Listo! Tu cita está confirmada 🎉' }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'create-real', name: 'create_appointment',
+        input: {
+          service_id: '22222222-2222-2222-2222-222222222201',
+          datetime_iso: appointmentIso,
+          client_name: 'Prueba guardia IA',
+        },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Ahora sí, tu cita está confirmada 🎉' }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [
+        { role: 'assistant', content: '¿Todo correcto? ¿Confirmo tu cita de Manicure?' },
+        { role: 'user', content: 'Sí, confirmo' },
+      ],
+      client,
+    });
+
+    assert.strictEqual(reply, 'Ahora sí, tu cita está confirmada 🎉');
+    assert.strictEqual(client.calls.length, 3);
+    assert.ok(
+      client.calls[1].messages.some(
+        (message) => typeof message.content === 'string' && message.content.includes('todavía no ejecutaste create_appointment')
+      ),
+      'debe bloquear la confirmación falsa y forzar la tool'
+    );
+    const stored = await db.query(
+      `SELECT status FROM appointments
+       WHERE business_id = $1 AND client_phone = $2 AND client_name = $3`,
+      [business.id, clientPhone, 'Prueba guardia IA']
+    );
+    assert.strictEqual(stored.rows.length, 1);
+    assert.strictEqual(stored.rows[0].status, 'confirmed');
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
+test('si create_appointment falla, bloquea la confirmación falsa y comunica el error', async () => {
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'create-failed', name: 'create_appointment',
+        input: {
+          service_id: '22222222-2222-2222-2222-222222222201',
+          datetime_iso: '2024-08-10T10:00:00-06:00',
+          client_name: 'No debe guardarse',
+        },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: '¡Listo! Tu cita está confirmada.' }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'No pude crear la cita porque esa fecha ya pasó.' }],
+    },
+  ]);
+
+  const reply = await aiService.generateReply({
+    business,
+    clientPhone: 'testclient-ai-create-error',
+    history: [
+      { role: 'assistant', content: '¿Confirmo tu cita?' },
+      { role: 'user', content: 'Sí, confirmo' },
+    ],
+    client,
+  });
+
+  assert.strictEqual(reply, 'No pude crear la cita porque esa fecha ya pasó.');
+  assert.strictEqual(client.calls.length, 3);
+  assert.ok(
+    client.calls[2].messages.some(
+      (message) => typeof message.content === 'string' && message.content.includes('create_appointment falló')
+    ),
+    'debe informar internamente el error real antes de responder'
+  );
 });
 
 test('no entrega una respuesta de no disponibilidad hasta corregir una fecha pasada', async () => {
