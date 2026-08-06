@@ -43,11 +43,16 @@ async function buildSystem(business) {
     `- Para cancelar o reprogramar, usa get_my_appointments para identificar la cita y confirma la acción antes de ejecutarla.\n` +
     `- Si la clienta rechaza un recordatorio, ayúdala a elegir un nuevo horario y usa reschedule_appointment; no crees una cita duplicada.\n` +
     `- Usa check_availability para proponer horarios reales; ofrece pocas opciones claras.\n` +
+    `- Si la clienta menciona día y mes pero omite el año, usa la próxima ocurrencia futura de esa fecha: ` +
+    `el año actual si aún no ha pasado o el siguiente si ya pasó. Nunca selecciones un año anterior.\n` +
+    `- Si check_availability devuelve fecha_pasada, corrige la fecha y vuelve a ejecutar la tool antes de responder. ` +
+    `Nunca presentes fecha_pasada como si el negocio estuviera cerrado o sin disponibilidad.\n` +
     `- Escribe en español, mensajes cortos y cálidos estilo WhatsApp. Usa algún emoji con moderación.\n` +
     `- Si no entiendes o falta información, pregunta de forma breve.`;
 
   const now = time.nowInZone(business.timezone);
   const volatile =
+    `Fecha actual ISO: ${now.toFormat('yyyy-LL-dd')}. ` +
     `Fecha y hora actual: ${time.formatDateTime(now)} (zona ${business.timezone}). ` +
     `Interpreta expresiones como "mañana" o "el viernes" con base en esta fecha.`;
 
@@ -109,6 +114,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   const system = isAdmin ? await buildAdminSystem(business) : await buildSystem(business);
   const ctx = { business, clientPhone };
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
+  let availabilityDateNeedsCorrection = false;
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const resp = await anthropic.messages.create({
@@ -125,7 +131,22 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
         if (block.type !== 'tool_use') continue;
         let result;
         try {
+          if (block.name === 'check_availability') {
+            logger.info('[ai] Consulta de disponibilidad', {
+              business_id: business.id,
+              date: block.input?.date,
+            });
+          }
           result = await toolset.execute(block.name, block.input, ctx);
+          if (block.name === 'check_availability') {
+            let parsedResult;
+            try {
+              parsedResult = JSON.parse(result);
+            } catch {
+              parsedResult = null;
+            }
+            availabilityDateNeedsCorrection = parsedResult?.nota === 'fecha_pasada';
+          }
         } catch (err) {
           logger.error('[ai] Error ejecutando tool', { tool: block.name, error: err.message });
           result = JSON.stringify({ error: 'error_interno' });
@@ -143,6 +164,15 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       .map((b) => b.text)
       .join('\n')
       .trim();
+    if (availabilityDateNeedsCorrection) {
+      messages.push({ role: 'assistant', content: resp.content });
+      messages.push({
+        role: 'user',
+        content:
+          'Corrección interna obligatoria: la fecha consultada estaba en el pasado. Recalcula la próxima fecha futura correspondiente y ejecuta check_availability otra vez antes de responder a la clienta.',
+      });
+      continue;
+    }
     return text || 'Perdona, ¿me lo repites? 🙏';
   }
 

@@ -1,5 +1,6 @@
 const { test, after } = require('node:test');
 const assert = require('node:assert');
+const { DateTime } = require('luxon');
 const db = require('../src/config/db');
 const aiService = require('../src/services/aiService');
 
@@ -89,4 +90,58 @@ test('el system prompt cachea el bloque estable y deja la fecha en un bloque vol
   assert.deepStrictEqual(captured.system[0].cache_control, { type: 'ephemeral' });
   assert.strictEqual(captured.system[1].cache_control, undefined);
   assert.match(captured.system[1].text, /Fecha y hora actual/);
+  assert.match(captured.system[1].text, /Fecha actual ISO: \d{4}-\d{2}-\d{2}/);
+  assert.match(captured.system[0].text, /próxima ocurrencia futura/);
+  assert.match(captured.system[0].text, /fecha_pasada/);
+});
+
+test('no entrega una respuesta de no disponibilidad hasta corregir una fecha pasada', async () => {
+  let future = DateTime.now().setZone(business.timezone).plus({ days: 10 }).startOf('day');
+  if (future.weekday === 7) future = future.plus({ days: 1 });
+  const futureDate = future.toFormat('yyyy-MM-dd');
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'past-date', name: 'check_availability',
+        input: { date: '2024-08-10', service_id: '22222222-2222-2222-2222-222222222201' },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'No hay disponibilidad.' }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'future-date', name: 'check_availability',
+        input: { date: futureDate, service_id: '22222222-2222-2222-2222-222222222201' },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Sí hay horarios disponibles.' }],
+    },
+  ]);
+
+  const reply = await aiService.generateReply({
+    business,
+    clientPhone: 'testclient-ai',
+    history: [{ role: 'user', content: 'Quiero agendar el 10 de agosto' }],
+    client,
+  });
+
+  assert.strictEqual(reply, 'Sí hay horarios disponibles.');
+  assert.strictEqual(client.calls.length, 4);
+  const firstToolResult = client.calls[1].messages
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .find((block) => block.type === 'tool_result' && block.tool_use_id === 'past-date');
+  assert.match(firstToolResult.content, /fecha_pasada/);
+  assert.match(firstToolResult.content, /fecha_actual/);
+  assert.ok(
+    client.calls[2].messages.some(
+      (message) => typeof message.content === 'string' && message.content.includes('Corrección interna obligatoria')
+    ),
+    'debe forzar una nueva consulta antes de responder'
+  );
 });

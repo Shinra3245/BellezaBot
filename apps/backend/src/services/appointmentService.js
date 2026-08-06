@@ -128,7 +128,7 @@ async function getOverlappingBlocks(businessId, fromISO, toISO) {
 
 /**
  * Calcula los huecos libres para un día y servicio.
- * @returns {Promise<{ slots: Array<{datetime_iso, label}>, closed: boolean, tooFar: boolean }>}
+ * @returns {Promise<{ slots: Array<{datetime_iso, label}>, closed: boolean, past: boolean, tooFar: boolean }>}
  */
 async function getAvailability({ businessId, date, serviceId, timezone }) {
   const service = await getService(businessId, serviceId);
@@ -138,8 +138,13 @@ async function getAvailability({ businessId, date, serviceId, timezone }) {
   if (!dayStart.isValid) return { error: 'fecha_invalida' };
 
   const now = time.nowInZone(timezone);
+  const daysAhead = dayStart.diff(now.startOf('day'), 'days').days;
+  // Distinguir una fecha pasada evita que la IA confunda sus slots vacíos con falta de disponibilidad.
+  if (daysAhead < 0) {
+    return { slots: [], past: true };
+  }
   // No agendar más allá de la ventana máxima.
-  if (dayStart.diff(now.startOf('day'), 'days').days > MAX_DAYS_AHEAD) {
+  if (daysAhead > MAX_DAYS_AHEAD) {
     return { slots: [], tooFar: true };
   }
 

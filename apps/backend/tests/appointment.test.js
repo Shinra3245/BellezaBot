@@ -49,6 +49,16 @@ test('domingo aparece como cerrado (sin slots)', async () => {
   assert.strictEqual(res.slots.length, 0);
 });
 
+test('una fecha pasada se identifica explícitamente y no se reporta como falta de disponibilidad', async () => {
+  const date = DateTime.now().setZone(TZ).minus({ days: 1 }).toFormat('yyyy-MM-dd');
+  const res = await appointmentService.getAvailability({
+    businessId: BUSINESS_ID, date, serviceId: MANICURE_ID, timezone: TZ,
+  });
+  assert.strictEqual(res.past, true);
+  assert.deepStrictEqual(res.slots, []);
+  assert.strictEqual(res.closed, undefined);
+});
+
 test('crear una cita ocupa el slot y ya no se ofrece (sin empalmes)', async () => {
   const date = futureWeekday().toFormat('yyyy-MM-dd');
   const before = await appointmentService.getAvailability({

@@ -2,6 +2,7 @@
 // Aislamiento multi-tenant: el business_id y el client_phone SIEMPRE vienen del contexto
 // del servidor (ctx), NUNCA de parámetros decididos por la IA.
 const appointmentService = require('../services/appointmentService');
+const time = require('../utils/time');
 
 // Esquemas de tools en el formato de la API de Anthropic.
 const definitions = [
@@ -14,11 +15,15 @@ const definitions = [
   {
     name: 'check_availability',
     description:
-      'Devuelve los horarios disponibles para un servicio en una fecha dada. Úsala antes de proponer horarios; nunca inventes horarios.',
+      'Devuelve los horarios disponibles para un servicio en una fecha futura. Úsala antes de proponer horarios; nunca inventes horarios ni uses un año anterior al de la fecha actual.',
     input_schema: {
       type: 'object',
       properties: {
-        date: { type: 'string', description: "Fecha en formato YYYY-MM-DD (zona horaria del negocio)" },
+        date: {
+          type: 'string',
+          description:
+            'Fecha futura en formato YYYY-MM-DD (zona horaria del negocio). Si la clienta omite el año, usa la próxima ocurrencia futura de esa fecha.',
+        },
         service_id: { type: 'string', description: 'ID del servicio (de get_service_info)' },
       },
       required: ['date', 'service_id'],
@@ -93,16 +98,32 @@ async function execute(name, input, ctx) {
     }
 
     case 'check_availability': {
+      const currentDate = time.nowInZone(timezone).toFormat('yyyy-LL-dd');
       const res = await appointmentService.getAvailability({
         businessId,
         date: input.date,
         serviceId: input.service_id,
         timezone,
       });
-      if (res.error) return JSON.stringify({ error: res.error });
-      if (res.tooFar) return JSON.stringify({ disponibilidad: [], nota: 'fecha_fuera_de_ventana' });
-      if (res.closed) return JSON.stringify({ disponibilidad: [], nota: 'cerrado_ese_dia' });
+      const dateContext = { fecha_solicitada: input.date, fecha_actual: currentDate };
+      if (res.error) return JSON.stringify({ ...dateContext, error: res.error });
+      if (res.past) {
+        return JSON.stringify({
+          ...dateContext,
+          disponibilidad: [],
+          nota: 'fecha_pasada',
+          accion_requerida:
+            'Corrige el año a la próxima fecha futura correspondiente y vuelve a ejecutar check_availability antes de responder.',
+        });
+      }
+      if (res.tooFar) {
+        return JSON.stringify({ ...dateContext, disponibilidad: [], nota: 'fecha_fuera_de_ventana' });
+      }
+      if (res.closed) {
+        return JSON.stringify({ ...dateContext, disponibilidad: [], nota: 'cerrado_ese_dia' });
+      }
       return JSON.stringify({
+        ...dateContext,
         disponibilidad: res.slots.map((s) => ({ datetime_iso: s.datetime_iso, hora: s.label })),
       });
     }
