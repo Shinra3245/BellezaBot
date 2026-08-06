@@ -88,6 +88,8 @@ async function buildAdminSystem(business) {
     `get_appointments coincida exactamente con la solicitada.\n` +
     `- Al usar get_week_summary, informa exactamente el rango semana_desde/semana_hasta devuelto por la tool; ` +
     `no calcules ni inventes esas fechas.\n` +
+    `- Las respuestas se leen en WhatsApp móvil: nunca uses tablas Markdown ni columnas con "|". ` +
+    `Usa bloques cortos, una cita debajo de otra y pocos emojis como guías visuales.\n` +
     `- Antes de CUALQUIER acción destructiva o irreversible (cancelar o reprogramar una cita), ` +
     `confirma explícitamente con la dueña citando los datos ("¿Cancelo la cita de María de las 4 PM? Sí/No") ` +
     `y solo ejecuta la tool cuando ella confirme.\n` +
@@ -129,7 +131,11 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   let appointmentCreated = false;
   let appointmentCreationError = null;
   const adminExpectedAgendaDate = isAdmin ? getExpectedAdminAgendaDate(history, business.timezone) : null;
+  const adminWeekSummaryRequired =
+    isAdmin && !adminExpectedAgendaDate && isAdminWeekSummaryTurn(history);
   let adminAgendaResult = null;
+  let adminWeekResult = null;
+  let adminDirectReply = null;
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const resp = await anthropic.messages.create({
@@ -197,12 +203,30 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
               error: parsedResult?.error,
             });
             if (
-              adminExpectedAgendaDate &&
-              parsedResult?.fecha === adminExpectedAgendaDate &&
+              (!adminExpectedAgendaDate || parsedResult?.fecha === adminExpectedAgendaDate) &&
               Array.isArray(parsedResult?.citas) &&
               !parsedResult.error
             ) {
               adminAgendaResult = parsedResult;
+              adminDirectReply = formatAdminDailyAgenda(parsedResult, business.timezone);
+            }
+          }
+          if (block.name === 'get_week_summary') {
+            let parsedResult;
+            try {
+              parsedResult = JSON.parse(result);
+            } catch {
+              parsedResult = null;
+            }
+            if (
+              typeof parsedResult?.total === 'number' &&
+              parsedResult?.semana_desde &&
+              parsedResult?.semana_hasta &&
+              parsedResult?.por_dia &&
+              parsedResult?.por_estado
+            ) {
+              adminWeekResult = parsedResult;
+              adminDirectReply = formatAdminWeekSummary(parsedResult, business.timezone);
             }
           }
         } catch (err) {
@@ -217,6 +241,9 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       }
       messages.push({ role: 'assistant', content: resp.content });
       messages.push({ role: 'user', content: toolResults });
+      // Las consultas administrativas de solo lectura se presentan desde el backend para
+      // garantizar datos y formato móvil; la IA solo interpreta qué tool debe ejecutar.
+      if (adminDirectReply) return adminDirectReply;
       continue;
     }
 
@@ -267,6 +294,15 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
         : `Corrección interna obligatoria: get_appointments devolvió ${adminAgendaResult.citas.length} cita(s) ` +
           `para ${adminAgendaResult.fecha}. Resume esas citas reales y no digas que la agenda está vacía.`;
       messages.push({ role: 'user', content: correction });
+      continue;
+    }
+    if (adminWeekSummaryRequired && !adminWeekResult) {
+      messages.push({ role: 'assistant', content: resp.content });
+      messages.push({
+        role: 'user',
+        content:
+          'Corrección interna obligatoria: la dueña pidió un resumen semanal. Ejecuta get_week_summary antes de responder y no inventes el rango ni los conteos.',
+      });
       continue;
     }
     return text || 'Perdona, ¿me lo repites? 🙏';
@@ -370,6 +406,92 @@ function claimsNoAppointments(text) {
     /\bninguna cita\b/.test(normalized) ||
     /\bagenda (?:esta )?vacia\b/.test(normalized)
   );
+}
+
+function isAdminWeekSummaryTurn(history) {
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return false;
+  const text = normalizeForIntent(latestUser.content);
+  return (
+    /\bsemana(?:l)?\b/.test(text) && /\b(agenda|citas?|resumen)\b/.test(text) ||
+    /\bresumen\b[\s\S]{0,40}\bcitas?\b/.test(text)
+  );
+}
+
+const ADMIN_STATUS_LABELS = {
+  pending: '⏳ Pendiente',
+  confirmed: '✅ Confirmada',
+  rescheduled: '🔄 Reprogramada',
+  cancelled: '🚫 Cancelada',
+  completed: '☑️ Completada',
+  no_show: '⚠️ No asistió',
+};
+
+function capitalize(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function appointmentCountLabel(count) {
+  return `${count} ${count === 1 ? 'cita' : 'citas'}`;
+}
+
+function formatAdminDailyAgenda(result, timezone) {
+  const date = time.startOfDay(result.fecha, timezone).setLocale('es');
+  const dateLabel = capitalize(date.toFormat("cccc d 'de' LLLL 'de' yyyy"));
+  const lines = [`📅 *Agenda del ${dateLabel}*`];
+
+  if (result.citas.length === 0) {
+    lines.push('', 'No hay citas programadas. 📭');
+    return lines.join('\n');
+  }
+
+  lines.push(`*${appointmentCountLabel(result.citas.length)}*`);
+  result.citas.forEach((appointment, index) => {
+    lines.push(
+      '',
+      `*${index + 1}. ${appointment.hora} — ${appointment.servicio}*`,
+      `👤 ${appointment.cliente}`,
+      `📱 ${appointment.telefono}`,
+      ADMIN_STATUS_LABELS[appointment.estado] || `Estado: ${appointment.estado}`
+    );
+  });
+  return lines.join('\n');
+}
+
+function formatAdminWeekSummary(result, timezone) {
+  const from = time.startOfDay(result.semana_desde, timezone).setLocale('es');
+  const to = time.startOfDay(result.semana_hasta, timezone).setLocale('es');
+  const sameMonth = from.month === to.month && from.year === to.year;
+  const range = sameMonth
+    ? `Del ${from.toFormat('cccc d')} al ${to.toFormat("cccc d 'de' LLLL 'de' yyyy")}`
+    : `Del ${from.toFormat("cccc d 'de' LLLL")} al ${to.toFormat("cccc d 'de' LLLL 'de' yyyy")}`;
+  const lines = [
+    '📅 *Resumen semanal*',
+    capitalize(range),
+    '',
+    `Total: *${appointmentCountLabel(result.total)}*`,
+  ];
+
+  if (result.total === 0) {
+    lines.push('', 'No hay citas programadas esta semana. 📭');
+    return lines.join('\n');
+  }
+
+  const days = Object.entries(result.por_dia).filter(([, count]) => count > 0);
+  if (days.length > 0) {
+    lines.push('', '*Por día*');
+    for (const [day, count] of days) lines.push(`• ${capitalize(day)}: ${appointmentCountLabel(count)}`);
+  }
+
+  const statuses = Object.entries(result.por_estado).filter(([, count]) => count > 0);
+  if (statuses.length > 0) {
+    lines.push('', '*Por estado*');
+    for (const [status, count] of statuses) {
+      const label = (ADMIN_STATUS_LABELS[status] || capitalize(status)).replace(/^\S+\s/, '');
+      lines.push(`• ${label}: ${count}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 module.exports = { generateReply, MOCK_REPLY };

@@ -95,7 +95,7 @@ async function execute(name, input, ctx) {
           hora: a.when,
           servicio: a.service_name,
           cliente: a.client_name || '(sin nombre)',
-          telefono: a.client_phone,
+          telefono: `+${whatsappService.normalizeRecipient(a.client_phone)}`,
           estado: a.status,
         })),
       });
