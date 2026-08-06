@@ -16,7 +16,11 @@ const definitions = [
     input_schema: {
       type: 'object',
       properties: {
-        date: { type: 'string', description: 'Fecha en formato YYYY-MM-DD (zona del negocio). Si se omite, hoy.' },
+        date: {
+          type: 'string',
+          description:
+            'Fecha exacta en formato YYYY-MM-DD (zona del negocio). Si la dueña indica día y mes sin año, usa el año de la fecha actual. Si se omite la fecha, usa hoy.',
+        },
       },
       additionalProperties: false,
     },
@@ -79,11 +83,13 @@ async function execute(name, input, ctx) {
 
   switch (name) {
     case 'get_appointments': {
-      const date = input.date || isoDateInZone(timezone);
+      const currentDate = isoDateInZone(timezone);
+      const date = input.date || currentDate;
       const res = await appointmentService.getAppointmentsByDate({ businessId, date, timezone });
       if (res.error) return JSON.stringify({ error: res.error });
       return JSON.stringify({
         fecha: date,
+        fecha_actual: currentDate,
         citas: res.appointments.map((a) => ({
           cita_id: a.id,
           hora: a.when,

@@ -82,6 +82,10 @@ async function buildAdminSystem(business) {
     `- Cancelar una cita (cancel_appointment_admin) o reprogramarla (reschedule_appointment_admin).\n` +
     `- Bloquear rangos de horario (block_time_slot) para que no se ofrezcan a clientas.\n\n` +
     `Reglas:\n` +
+    `- Para responder cualquier consulta de agenda o citas de un día, debes ejecutar get_appointments en el turno actual, ` +
+    `aunque esperes que el resultado esté vacío. Nunca afirmes que no hay citas sin consultar la tool.\n` +
+    `- Si la dueña indica día y mes sin año, usa el año de la fecha actual. Verifica que la fecha enviada a ` +
+    `get_appointments coincida exactamente con la solicitada.\n` +
     `- Antes de CUALQUIER acción destructiva o irreversible (cancelar o reprogramar una cita), ` +
     `confirma explícitamente con la dueña citando los datos ("¿Cancelo la cita de María de las 4 PM? Sí/No") ` +
     `y solo ejecuta la tool cuando ella confirme.\n` +
@@ -91,6 +95,7 @@ async function buildAdminSystem(business) {
 
   const now = time.nowInZone(business.timezone);
   const volatile =
+    `Fecha actual ISO: ${now.toFormat('yyyy-LL-dd')}. ` +
     `Fecha y hora actual: ${time.formatDateTime(now)} (zona ${business.timezone}). ` +
     `Interpreta "hoy", "mañana", "el viernes" con base en esta fecha.`;
 
@@ -121,6 +126,8 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
   let appointmentCreationError = null;
+  const adminExpectedAgendaDate = isAdmin ? getExpectedAdminAgendaDate(history, business.timezone) : null;
+  let adminAgendaResult = null;
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const resp = await anthropic.messages.create({
@@ -173,6 +180,29 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
               error: parsedResult?.ok === true ? undefined : appointmentCreationError,
             });
           }
+          if (block.name === 'get_appointments') {
+            let parsedResult;
+            try {
+              parsedResult = JSON.parse(result);
+            } catch {
+              parsedResult = null;
+            }
+            logger.info('[ai] Consulta administrativa de agenda', {
+              business_id: business.id,
+              requested_date: adminExpectedAgendaDate,
+              tool_date: parsedResult?.fecha || block.input?.date,
+              count: Array.isArray(parsedResult?.citas) ? parsedResult.citas.length : undefined,
+              error: parsedResult?.error,
+            });
+            if (
+              adminExpectedAgendaDate &&
+              parsedResult?.fecha === adminExpectedAgendaDate &&
+              Array.isArray(parsedResult?.citas) &&
+              !parsedResult.error
+            ) {
+              adminAgendaResult = parsedResult;
+            }
+          }
         } catch (err) {
           if (block.name === 'create_appointment') {
             appointmentCreationAttempted = true;
@@ -222,6 +252,19 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       messages.push({ role: 'user', content: correction });
       continue;
     }
+    const missingAdminAgendaQuery = adminExpectedAgendaDate && !adminAgendaResult;
+    const falseEmptyAdminAgenda =
+      adminAgendaResult?.citas.length > 0 && claimsNoAppointments(text);
+    if (missingAdminAgendaQuery || falseEmptyAdminAgenda) {
+      messages.push({ role: 'assistant', content: resp.content });
+      const correction = missingAdminAgendaQuery
+        ? `Corrección interna obligatoria: la dueña pidió la agenda de ${adminExpectedAgendaDate}. ` +
+          `Ejecuta get_appointments exactamente con date=${adminExpectedAgendaDate} antes de responder; no uses otra fecha ni inventes el resultado.`
+        : `Corrección interna obligatoria: get_appointments devolvió ${adminAgendaResult.citas.length} cita(s) ` +
+          `para ${adminAgendaResult.fecha}. Resume esas citas reales y no digas que la agenda está vacía.`;
+      messages.push({ role: 'user', content: correction });
+      continue;
+    }
     return text || 'Perdona, ¿me lo repites? 🙏';
   }
 
@@ -263,6 +306,65 @@ function claimsAppointmentConfirmed(text) {
   return (
     /\b(cita|reservacion|turno)\b[\s\S]{0,100}\b(confirmad[ao]|agendad[ao]|reservad[ao])\b/.test(normalized) ||
     /\b(confirmad[ao]|agendad[ao]|reservad[ao])\b[\s\S]{0,100}\b(cita|reservacion|turno)\b/.test(normalized)
+  );
+}
+
+const SPANISH_MONTHS = {
+  enero: 1,
+  febrero: 2,
+  marzo: 3,
+  abril: 4,
+  mayo: 5,
+  junio: 6,
+  julio: 7,
+  agosto: 8,
+  septiembre: 9,
+  setiembre: 9,
+  octubre: 10,
+  noviembre: 11,
+  diciembre: 12,
+};
+
+function getExpectedAdminAgendaDate(history, timezone) {
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return null;
+  const text = normalizeForIntent(latestUser.content);
+  const agendaLookup =
+    /\bagenda\b/.test(text) ||
+    /\bresumen\b[\s\S]{0,40}\bcitas?\b/.test(text) ||
+    /\bconsulta(?:r)?\b[\s\S]{0,40}\b(dia|fecha)\b/.test(text) ||
+    /\b(citas?|turnos?)\b[\s\S]{0,40}\b(dia|fecha|hoy|manana|de|del|para)\b/.test(text);
+  if (!agendaLookup) return null;
+
+  const now = time.nowInZone(timezone);
+  if (/\bhoy\b/.test(text)) return now.toFormat('yyyy-LL-dd');
+  if (/\bmanana\b/.test(text)) return now.plus({ days: 1 }).toFormat('yyyy-LL-dd');
+
+  const isoMatch = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (isoMatch) {
+    const parsed = time.startOfDay(isoMatch[1], timezone);
+    return parsed.isValid ? parsed.toFormat('yyyy-LL-dd') : null;
+  }
+
+  const namedDate = text.match(
+    /\b(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:\s+(?:de|del)\s+(\d{4}))?\b/
+  );
+  if (!namedDate) return null;
+  const year = namedDate[3] ? Number(namedDate[3]) : now.year;
+  const parsed = time.DateTime.fromObject(
+    { year, month: SPANISH_MONTHS[namedDate[2]], day: Number(namedDate[1]) },
+    { zone: timezone }
+  );
+  return parsed.isValid ? parsed.toFormat('yyyy-LL-dd') : null;
+}
+
+function claimsNoAppointments(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    /\bsin citas?\b/.test(normalized) ||
+    /\bno (?:hay|tienes|tiene) citas?\b/.test(normalized) ||
+    /\bninguna cita\b/.test(normalized) ||
+    /\bagenda (?:esta )?vacia\b/.test(normalized)
   );
 }
 

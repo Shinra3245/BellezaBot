@@ -197,6 +197,86 @@ test('si create_appointment falla, bloquea la confirmación falsa y comunica el 
   );
 });
 
+test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con una respuesta vacía', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 12 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const correctDate = appointmentDay.toFormat('yyyy-MM-dd');
+  const wrongDate = appointmentDay.minus({ years: 2 }).toFormat('yyyy-MM-dd');
+  const monthName = appointmentDay.setLocale('es').toFormat('LLLL');
+  const clientPhone = 'testclient-admin-agenda-guard';
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba agenda admin',
+      appointmentDay.set({ hour: 17, minute: 30 }).toISO(),
+      appointmentDay.set({ hour: 18, minute: 15 }).toISO(),
+    ]
+  );
+
+  const client = fakeClient([
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Sin citas ese día. 📭' }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'wrong-admin-date', name: 'get_appointments', input: { date: wrongDate } }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'No hay citas para esa fecha.' }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'correct-admin-date', name: 'get_appointments', input: { date: correctDate } }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Tienes una cita de Prueba agenda admin a las 5:30 p. m.' }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone: 'owner-test',
+      history: [{
+        role: 'user',
+        content: `Dame el resumen de citas del día ${appointmentDay.day} de ${monthName} del ${appointmentDay.year}`,
+      }],
+      client,
+      isAdmin: true,
+    });
+
+    assert.match(reply, /Prueba agenda admin/);
+    assert.strictEqual(client.calls.length, 5);
+    assert.match(client.calls[0].system[0].text, /debes ejecutar get_appointments en el turno actual/);
+    assert.match(client.calls[0].system[1].text, /Fecha actual ISO: \d{4}-\d{2}-\d{2}/);
+    assert.ok(
+      client.calls[1].messages.some(
+        (message) => typeof message.content === 'string' && message.content.includes(`date=${correctDate}`)
+      ),
+      'debe forzar la consulta si la IA responde sin usar la tool'
+    );
+    assert.ok(
+      client.calls[3].messages.some(
+        (message) => typeof message.content === 'string' && message.content.includes(`date=${correctDate}`)
+      ),
+      'debe rechazar una consulta realizada con otro año'
+    );
+    const correctToolResult = client.calls[4].messages
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .find((block) => block.type === 'tool_result' && block.tool_use_id === 'correct-admin-date');
+    assert.match(correctToolResult.content, /Prueba agenda admin/);
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
 test('no entrega una respuesta de no disponibilidad hasta corregir una fecha pasada', async () => {
   let future = DateTime.now().setZone(business.timezone).plus({ days: 10 }).startOf('day');
   if (future.weekday === 7) future = future.plus({ days: 1 });
