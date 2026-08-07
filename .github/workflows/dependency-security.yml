@@ -56,6 +56,6 @@ jobs:
         working-directory: apps/${{ matrix.app }}
         run: npm audit --audit-level=moderate
 
-      - name: Verify registry signatures
+      - name: Verify registry signatures and minimum package age
         working-directory: apps/${{ matrix.app }}
-        run: npm audit signatures
+        run: npm audit signatures --min-release-age=3
