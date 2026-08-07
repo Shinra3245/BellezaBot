@@ -1,0 +1,61 @@
+name: Dependency security
+
+on:
+  pull_request:
+    paths:
+      - "apps/**/package.json"
+      - "apps/**/package-lock.json"
+      - "apps/**/.npmrc"
+      - ".github/dependabot.yml"
+      - ".github/scripts/verify-dependency-policy.mjs"
+      - ".github/workflows/dependency-security.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/**/package.json"
+      - "apps/**/package-lock.json"
+      - "apps/**/.npmrc"
+      - ".github/dependabot.yml"
+      - ".github/scripts/verify-dependency-policy.mjs"
+      - ".github/workflows/dependency-security.yml"
+  schedule:
+    - cron: "23 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [backend, frontend]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/${{ matrix.app }}/package-lock.json
+
+      - name: Verify dependency policy
+        run: node .github/scripts/verify-dependency-policy.mjs apps/${{ matrix.app }}
+
+      - name: Install without lifecycle scripts
+        working-directory: apps/${{ matrix.app }}
+        run: npm ci --ignore-scripts
+
+      - name: Audit known vulnerabilities
+        working-directory: apps/${{ matrix.app }}
+        run: npm audit --audit-level=moderate
+
+      - name: Verify registry signatures
+        working-directory: apps/${{ matrix.app }}
+        run: npm audit signatures

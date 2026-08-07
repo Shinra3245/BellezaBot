@@ -1,5 +1,5 @@
-import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { InternalLink } from '../routing/Router';
 
 // Navegación mobile-first: barra inferior de pestañas (como una app nativa).
 const ownerTabs = [
@@ -10,7 +10,7 @@ const ownerTabs = [
 ];
 const adminTabs = [{ to: '/tenants', label: 'Negocios', icon: '🏪' }];
 
-export default function Layout() {
+export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const tabs = user?.role === 'superadmin' ? adminTabs : ownerTabs;
 
@@ -22,15 +22,15 @@ export default function Layout() {
       </header>
 
       <main className="app-main">
-        <Outlet />
+        {children}
       </main>
 
       <nav className="tabbar">
         {tabs.map((t) => (
-          <NavLink key={t.to} to={t.to} className={({ isActive }) => 'tab' + (isActive ? ' tab-active' : '')}>
+          <InternalLink key={t.to} to={t.to} className={({ isActive }) => 'tab' + (isActive ? ' tab-active' : '')}>
             <span className="tab-icon">{t.icon}</span>
             <span className="tab-label">{t.label}</span>
-          </NavLink>
+          </InternalLink>
         ))}
       </nav>
     </div>
