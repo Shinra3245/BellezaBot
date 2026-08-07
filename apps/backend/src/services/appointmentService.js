@@ -113,14 +113,21 @@ async function listServices(businessId) {
 }
 
 // Citas activas que se solapan con una ventana [from, to) para un negocio.
-async function getOverlappingAppointments(businessId, fromISO, toISO) {
+async function getOverlappingAppointments(businessId, fromISO, toISO, excludeAppointmentId = null) {
+  const params = [businessId, ACTIVE_STATUSES, fromISO, toISO];
+  let exclusion = '';
+  if (excludeAppointmentId) {
+    params.push(excludeAppointmentId);
+    exclusion = `AND id <> $${params.length}`;
+  }
   const { rows } = await db.query(
     `SELECT starts_at, ends_at
      FROM appointments
      WHERE business_id = $1
        AND status = ANY($2)
-       AND starts_at < $4 AND ends_at > $3`,
-    [businessId, ACTIVE_STATUSES, fromISO, toISO]
+       AND starts_at < $4 AND ends_at > $3
+       ${exclusion}`,
+    params
   );
   return rows;
 }
@@ -141,7 +148,15 @@ async function getOverlappingBlocks(businessId, fromISO, toISO) {
  * Calcula los huecos libres para un día y servicio.
  * @returns {Promise<{ slots: Array<{datetime_iso, label}>, closed: boolean, past: boolean, tooFar: boolean }>}
  */
-async function getAvailability({ businessId, date, serviceId, timezone, preferredTime = null }) {
+async function getAvailability({
+  businessId,
+  date,
+  serviceId,
+  timezone,
+  preferredTime = null,
+  excludeAppointmentId = null,
+  includeAllSlots = false,
+}) {
   const service = await getService(businessId, serviceId);
   if (!service) return { error: 'servicio_no_encontrado' };
 
@@ -174,7 +189,7 @@ async function getAvailability({ businessId, date, serviceId, timezone, preferre
 
   const dayEnd = dayStart.plus({ days: 1 });
   const [busy, blocks] = await Promise.all([
-    getOverlappingAppointments(businessId, dayStart.toISO(), dayEnd.toISO()),
+    getOverlappingAppointments(businessId, dayStart.toISO(), dayEnd.toISO(), excludeAppointmentId),
     getOverlappingBlocks(businessId, dayStart.toISO(), dayEnd.toISO()),
   ]);
   // Citas ocupadas y bloqueos de la dueña cuentan igual como "no disponible".
@@ -186,6 +201,7 @@ async function getAvailability({ businessId, date, serviceId, timezone, preferre
   const minStart = now.plus({ minutes: MIN_LEAD_MINUTES });
   const duration = service.duration_minutes;
   const slots = [];
+  const seenStarts = new Set();
 
   for (const sched of schedules) {
     let slotStart = time.atTime(dayStart, sched.start_time);
@@ -200,14 +216,16 @@ async function getAvailability({ businessId, date, serviceId, timezone, preferre
       );
 
       const matchesPreferredTime = !preferredStart || slotStart.toMillis() === preferredStart.toMillis();
-      if (!inPast && !overlaps && matchesPreferredTime) {
+      const slotKey = slotStart.toISO();
+      if (!inPast && !overlaps && matchesPreferredTime && !seenStarts.has(slotKey)) {
+        seenStarts.add(slotKey);
         slots.push({ datetime_iso: slotStart.toISO(), label: time.formatTime(slotStart) });
       }
       slotStart = slotStart.plus({ minutes: duration + BUFFER_MINUTES });
     }
   }
 
-  return { slots: preferredStart ? slots : selectRepresentativeSlots(slots) };
+  return { slots: preferredStart || includeAllSlots ? slots : selectRepresentativeSlots(slots) };
 }
 
 /**
@@ -331,6 +349,40 @@ async function getFutureAppointment(businessId, appointmentId, clientPhone = nul
     [appointmentId, businessId, clientPhone, ACTIVE_STATUSES]
   );
   return rows[0] || null;
+}
+
+/**
+ * Devuelve todos los horarios válidos para reprogramar una cita desde el panel web.
+ * Excluye la propia cita al calcular empalmes y no ofrece su horario actual.
+ */
+async function getRescheduleAvailability({ businessId, appointmentId, date, timezone }) {
+  const appointment = await getFutureAppointment(businessId, appointmentId);
+  if (!appointment) return { error: 'cita_no_encontrada' };
+
+  const availability = await getAvailability({
+    businessId,
+    date,
+    serviceId: appointment.service_id,
+    timezone,
+    excludeAppointmentId: appointmentId,
+    includeAllSlots: true,
+  });
+  if (availability.error) return availability;
+
+  const currentStartMillis = time.DateTime.fromJSDate(appointment.starts_at).toMillis();
+  const today = time.nowInZone(timezone).startOf('day');
+
+  return {
+    ...availability,
+    slots: availability.slots.filter(
+      (slot) => time.DateTime.fromISO(slot.datetime_iso).toMillis() !== currentStartMillis
+    ),
+    timezone,
+    service_name: appointment.service_name,
+    duration_minutes: appointment.duration_minutes,
+    min_date: today.toFormat('yyyy-LL-dd'),
+    max_date: today.plus({ days: MAX_DAYS_AHEAD }).toFormat('yyyy-LL-dd'),
+  };
 }
 
 // Próximas citas activas de una clienta. Le permite identificar una cita sin conocer su UUID.
@@ -539,6 +591,7 @@ module.exports = {
   cancelAppointment,
   getUpcomingAppointments,
   getAppointmentsByDate,
+  getRescheduleAvailability,
   cancelAppointmentAdmin,
   rescheduleAppointmentAdmin,
   rescheduleAppointmentClient,

@@ -4,9 +4,10 @@
 const appointmentService = require('../services/appointmentService');
 const whatsappService = require('../services/whatsappService');
 const logger = require('../utils/logger');
+const env = require('../config/env');
 
 // Plantilla aprobada para avisar a la clienta de una reprogramación (params: nombre, servicio, nueva fecha).
-const RESCHEDULE_TEMPLATE = 'cita_reprogramada';
+const RESCHEDULE_TEMPLATE = env.META_RESCHEDULE_TEMPLATE;
 
 const definitions = [
   {

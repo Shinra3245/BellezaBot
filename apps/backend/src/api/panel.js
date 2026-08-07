@@ -28,7 +28,28 @@ router.get(
     if (!fromISO.isValid || !toISO.isValid) throw httpError(400, 'Rango de fechas inválido');
     if (fromISO >= toISO) throw httpError(400, 'El inicio del rango debe ser anterior al final');
     const rows = await panelService.listAppointments(bid(req), fromISO.toISO(), toISO.toISO());
-    res.json({ appointments: rows });
+    res.json({ appointments: rows, timezone: tz });
+  })
+);
+
+// Horarios que realmente puede elegir la dueña al reprogramar una cita.
+router.get(
+  '/appointments/:id/availability',
+  asyncHandler(async (req, res) => {
+    const { date } = req.query;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw httpError(400, 'date es obligatoria y debe tener formato YYYY-MM-DD');
+    }
+
+    const business = await panelService.getBusiness(bid(req));
+    const result = await appointmentService.getRescheduleAvailability({
+      businessId: bid(req),
+      appointmentId: req.params.id,
+      date,
+      timezone: business.timezone,
+    });
+    if (result.error) throw httpError(mapApptError(result.error), result.error);
+    res.json(result);
   })
 );
 

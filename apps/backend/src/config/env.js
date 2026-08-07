@@ -67,6 +67,7 @@ const env = {
   META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN,
   META_PHONE_NUMBER_ID: process.env.META_PHONE_NUMBER_ID,
   META_APP_SECRET: process.env.META_APP_SECRET,
+  META_RESCHEDULE_TEMPLATE: process.env.META_RESCHEDULE_TEMPLATE || 'cita_reprogramada',
   // 'real' llama a la Graph API de Meta; 'mock' solo loguea (desarrollo sin tokens).
   WHATSAPP_MODE: whatsappMode,
 

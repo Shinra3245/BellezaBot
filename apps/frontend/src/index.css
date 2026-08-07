@@ -114,7 +114,24 @@ h2 { margin: 0 0 12px; font-size: 1.3rem; }
 .chips { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; background: #f8f0f4; border-radius: 20px; padding: 5px 10px; font-size: .82rem; }
 .chip-x { border: none; background: none; color: var(--pink); font-size: 1rem; line-height: 1; }
-.reschedule { margin-top: 10px; }
+.reschedule-form {
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+.reschedule-fields { display: grid; gap: 10px; }
+.reschedule-fields label {
+  display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: .82rem;
+}
+.reschedule-fields input, .reschedule-fields select {
+  width: 100%; min-height: 44px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text);
+}
+.reschedule-hint { margin: 8px 0 0; }
+.reschedule-save { width: 100%; min-height: 44px; margin-top: 10px; }
+
+@media (min-width: 520px) {
+  .reschedule-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .reschedule-save { width: auto; }
+}
 
 /* Login */
 .login-screen { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; }

@@ -259,6 +259,7 @@ test('listar citas, cambiar estado y reprogramar con aviso de plantilla', async 
   const list = await request(app).get(`/panel/appointments?from=${date}&to=${date}`)
     .set('Authorization', `Bearer ${tokenOwnerP}`);
   assert.strictEqual(list.status, 200);
+  assert.strictEqual(list.body.timezone, TZ);
   assert.ok(list.body.appointments.some((a) => a.id === apptId));
 
   // Reprogramar a las 16:00 del mismo día → debe avisar con plantilla.
@@ -276,6 +277,52 @@ test('listar citas, cambiar estado y reprogramar con aviso de plantilla', async 
     .send({ status: 'completed' });
   assert.strictEqual(st.status, 200);
   assert.strictEqual(st.body.cita.status, 'completed');
+});
+
+test('la reprogramación ofrece todos los horarios válidos y excluye empalmes', async () => {
+  const date = DateTime.now().setZone(TZ).plus({ days: 8 }).toFormat('yyyy-LL-dd');
+  const currentStart = DateTime.fromISO(date + 'T11:00', { zone: TZ });
+  const busyStart = DateTime.fromISO(date + 'T13:00', { zone: TZ });
+
+  const target = await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, '5215550000020', 'Reprogramar', $3, $4, 'confirmed') RETURNING id`,
+    [BIZ_P, SVC_P, currentStart.toISO(), currentStart.plus({ minutes: 60 }).toISO()]
+  );
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, '5215550000021', 'Ocupada', $3, $4, 'confirmed')`,
+    [BIZ_P, SVC_P, busyStart.toISO(), busyStart.plus({ minutes: 60 }).toISO()]
+  );
+
+  const appointmentId = target.rows[0].id;
+  const response = await request(app)
+    .get(`/panel/appointments/${appointmentId}/availability?date=${date}`)
+    .set('Authorization', `Bearer ${tokenOwnerP}`);
+
+  assert.strictEqual(response.status, 200);
+  assert.strictEqual(response.body.timezone, TZ);
+  assert.strictEqual(response.body.duration_minutes, 60);
+  assert.ok(response.body.slots.length > 6, 'el panel debe recibir todos los horarios, no solo una muestra');
+
+  const localTimes = response.body.slots.map((slot) =>
+    DateTime.fromISO(slot.datetime_iso).setZone(TZ).toFormat('HH:mm')
+  );
+  assert.ok(localTimes.includes('10:00'));
+  assert.ok(localTimes.includes('12:00'));
+  assert.ok(localTimes.includes('18:00'));
+  assert.ok(!localTimes.includes('11:00'), 'no debe ofrecer el mismo horario actual');
+  assert.ok(!localTimes.includes('13:00'), 'no debe ofrecer un horario ocupado');
+
+  const otherBusiness = await request(app)
+    .get(`/panel/appointments/${appointmentId}/availability?date=${date}`)
+    .set('Authorization', `Bearer ${tokenOwnerQ}`);
+  assert.strictEqual(otherBusiness.status, 404);
+
+  const invalidDate = await request(app)
+    .get(`/panel/appointments/${appointmentId}/availability?date=08-08-2026`)
+    .set('Authorization', `Bearer ${tokenOwnerP}`);
+  assert.strictEqual(invalidDate.status, 400);
 });
 
 // --- 5.3 Super-admin ---
