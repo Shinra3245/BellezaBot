@@ -23,6 +23,27 @@ updates:
     versioning-strategy: increase
     cooldown:
       default-days: 3
+    groups:
+      react-version-updates:
+        applies-to: version-updates
+        patterns:
+          - react
+          - react-dom
+      react-security-updates:
+        applies-to: security-updates
+        patterns:
+          - react
+          - react-dom
+      vite-version-updates:
+        applies-to: version-updates
+        patterns:
+          - vite
+          - "@vitejs/plugin-react"
+      vite-security-updates:
+        applies-to: security-updates
+        patterns:
+          - vite
+          - "@vitejs/plugin-react"
 
   - package-ecosystem: github-actions
     directory: /
