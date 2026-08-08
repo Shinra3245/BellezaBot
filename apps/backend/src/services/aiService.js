@@ -189,6 +189,10 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
   let appointmentCreationError = null;
+  const cancellationConfirmationRequired = !isAdmin && isCancellationConfirmationTurn(history);
+  let cancellationAttempted = false;
+  let cancellationSucceeded = false;
+  let cancellationError = null;
   const adminWeekSummaryRequired =
     isAdmin && Boolean(adminWeekReferenceDate);
   let adminAgendaResult = null;
@@ -224,7 +228,34 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
               effective_preferred_time: toolInput?.preferred_time,
             });
           }
-          result = await toolset.execute(block.name, toolInput, ctx);
+          // Una confirmación de cancelación nunca autoriza otra escritura. Esta barrera
+          // evita que el modelo convierta accidentalmente un "sí, cancélala" en una
+          // creación o reprogramación, como ocurrió en producción.
+          const mutationBlockedByCancellation =
+            cancellationConfirmationRequired &&
+            (block.name === 'create_appointment' || block.name === 'reschedule_appointment');
+          const cancellationBlockedWithoutConfirmation =
+            !isAdmin && block.name === 'cancel_appointment' && !cancellationConfirmationRequired;
+          if (mutationBlockedByCancellation || cancellationBlockedWithoutConfirmation) {
+            result = JSON.stringify({
+              ok: false,
+              error: mutationBlockedByCancellation
+                ? 'cancelacion_pendiente'
+                : 'confirmacion_cancelacion_requerida',
+              accion_requerida: mutationBlockedByCancellation
+                ? 'cancel_appointment'
+                : 'solicitar_confirmacion',
+            });
+            logger.warn('[ai] Escritura bloqueada por seguridad de cancelación', {
+              business_id: business.id,
+              blocked_tool: block.name,
+              reason: mutationBlockedByCancellation
+                ? 'cancelacion_pendiente'
+                : 'confirmacion_requerida',
+            });
+          } else {
+            result = await toolset.execute(block.name, toolInput, ctx);
+          }
           if (block.name === 'check_availability') {
             let parsedResult;
             try {
@@ -267,6 +298,19 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
               business_id: business.id,
               ok: parsedResult?.ok === true,
               error: parsedResult?.ok === true ? undefined : appointmentCreationError,
+            });
+          }
+          if (block.name === 'cancel_appointment') {
+            cancellationAttempted = true;
+            const parsedResult = parseToolResult(result);
+            cancellationSucceeded = parsedResult?.ok === true;
+            cancellationError = cancellationSucceeded
+              ? null
+              : parsedResult?.error || 'resultado_invalido';
+            logger.info('[ai] Resultado de cancelación de cita', {
+              business_id: business.id,
+              ok: cancellationSucceeded,
+              error: cancellationError || undefined,
             });
           }
           if (block.name === 'get_appointments') {
@@ -314,6 +358,11 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
           if (block.name === 'create_appointment') {
             appointmentCreationAttempted = true;
             appointmentCreationError = 'error_interno';
+          }
+          if (block.name === 'cancel_appointment') {
+            cancellationAttempted = true;
+            cancellationSucceeded = false;
+            cancellationError = 'error_interno';
           }
           logger.error('[ai] Error ejecutando tool', { tool: block.name, error: err.message });
           result = JSON.stringify({ error: 'error_interno' });
@@ -371,6 +420,30 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       } else {
         correction =
           'Corrección interna obligatoria: no existe un create_appointment exitoso en este turno. No afirmes que la cita quedó confirmada; solicita la confirmación explícita que falte antes de crearla.';
+      }
+      messages.push({ role: 'user', content: correction });
+      continue;
+    }
+    const falseCancellationClaim =
+      !isAdmin && claimsAppointmentCancelled(text) && !cancellationSucceeded;
+    const missingConfirmedCancellation =
+      cancellationConfirmationRequired && !cancellationAttempted;
+    if (falseCancellationClaim || missingConfirmedCancellation) {
+      messages.push({ role: 'assistant', content: resp.content });
+      let correction;
+      if (cancellationConfirmationRequired && !cancellationAttempted) {
+        correction =
+          'Corrección interna obligatoria: la clienta confirmó que desea cancelar, pero todavía no ejecutaste cancel_appointment. ' +
+          'Usa get_my_appointments si necesitas identificar la cita y luego ejecuta cancel_appointment. ' +
+          'No crees ni reprogrames ninguna cita.';
+      } else if (cancellationAttempted && cancellationError) {
+        correction =
+          `Corrección interna obligatoria: cancel_appointment falló con ${cancellationError}. ` +
+          'La cita no fue cancelada. Explica el problema real y no afirmes que se canceló.';
+      } else {
+        correction =
+          'Corrección interna obligatoria: no existe un cancel_appointment exitoso en este turno. ' +
+          'No afirmes que la cita fue cancelada.';
       }
       messages.push({ role: 'user', content: correction });
       continue;
@@ -460,15 +533,46 @@ function isAppointmentConfirmationTurn(history) {
   if (latestUserIndex < 0) return false;
 
   const latestUser = normalizeForIntent(history[latestUserIndex].content);
-  const affirmative =
-    /\bconfirmo\b/.test(latestUser) ||
-    /^(si|correcto|adelante|de acuerdo|ok|okay|vale)(\b|[,.!])/u.test(latestUser);
-  if (!affirmative) return false;
+  if (!isAffirmativeReply(latestUser)) return false;
 
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role !== 'assistant') continue;
     const previousAssistant = normalizeForIntent(history[i].content);
-    return /\bcita\b/.test(previousAssistant) && /\bconfirm(?:o|ar|as|acion)\b/.test(previousAssistant);
+    const isAnotherAction = /\b(cancel\w*|reprogram\w*)\b/.test(previousAssistant);
+    return (
+      !isAnotherAction &&
+      /\bcita\b/.test(previousAssistant) &&
+      /\bconfirm(?:o|ar|as|acion)\b/.test(previousAssistant)
+    );
+  }
+  return false;
+}
+
+function isAffirmativeReply(normalizedText) {
+  return (
+    /\bconfirmo\b/.test(normalizedText) ||
+    /^(si|correcto|adelante|de acuerdo|ok|okay|vale)(\b|[,.!])/u.test(normalizedText)
+  );
+}
+
+// Reconoce el "sí" que responde directamente a una confirmación de cancelación.
+// Se mantiene separado de isAppointmentConfirmationTurn para que nunca active
+// accidentalmente create_appointment.
+function isCancellationConfirmationTurn(history) {
+  const latestUserIndex = history.map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex < 0) return false;
+
+  const latestUser = normalizeForIntent(history[latestUserIndex].content);
+  if (!isAffirmativeReply(latestUser)) return false;
+
+  for (let i = latestUserIndex - 1; i >= 0; i--) {
+    if (history[i].role !== 'assistant') continue;
+    const previousAssistant = normalizeForIntent(history[i].content);
+    return (
+      /\b(cita|reservacion|turno)\b/.test(previousAssistant) &&
+      /\bcancel\w*\b/.test(previousAssistant) &&
+      /\bconfirm\w*\b/.test(previousAssistant)
+    );
   }
   return false;
 }
@@ -479,6 +583,14 @@ function claimsAppointmentConfirmed(text) {
   return (
     /\b(cita|reservacion|turno)\b[\s\S]{0,100}\b(confirmad[ao]|agendad[ao]|reservad[ao])\b/.test(normalized) ||
     /\b(confirmad[ao]|agendad[ao]|reservad[ao])\b[\s\S]{0,100}\b(cita|reservacion|turno)\b/.test(normalized)
+  );
+}
+
+function claimsAppointmentCancelled(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    /\b(cita|reservacion|turno)\b[\s\S]{0,100}\bcancelad[ao]\b/.test(normalized) ||
+    /\bcancelad[ao]\b[\s\S]{0,100}\b(cita|reservacion|turno)\b/.test(normalized)
   );
 }
 

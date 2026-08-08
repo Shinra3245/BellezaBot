@@ -264,6 +264,200 @@ test('si create_appointment falla, bloquea la confirmación falsa y comunica el 
   );
 });
 
+test('no ejecuta cancel_appointment antes de pedir confirmación explícita', async () => {
+  const appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 13 }).startOf('day');
+  const clientPhone = 'testclient-ai-cancel-confirmation';
+  const inserted = await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')
+     RETURNING id`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba confirmación requerida',
+      appointmentDay.set({ hour: 16 }).toISO(),
+      appointmentDay.set({ hour: 16, minute: 45 }).toISO(),
+    ]
+  );
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'premature-cancel', name: 'cancel_appointment',
+        input: { appointment_id: inserted.rows[0].id },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: '¿Confirmas que deseas cancelar esta cita? Responde Sí o No.' }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [{ role: 'user', content: 'Cancela mi cita del sábado' }],
+      client,
+    });
+
+    assert.match(reply, /¿Confirmas que deseas cancelar/);
+    const toolResult = client.calls[1].messages.find(
+      (message) => Array.isArray(message.content) &&
+        message.content.some((block) => block.tool_use_id === 'premature-cancel')
+    );
+    assert.match(JSON.stringify(toolResult), /confirmacion_cancelacion_requerida/);
+    const stored = await db.query('SELECT status FROM appointments WHERE id = $1', [inserted.rows[0].id]);
+    assert.strictEqual(stored.rows[0].status, 'confirmed');
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
+test('una confirmación de cancelación bloquea create_appointment y cancela la cita real', async () => {
+  const appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 14 }).startOf('day');
+  const clientPhone = 'testclient-ai-cancel-guard';
+  const inserted = await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'rescheduled')
+     RETURNING id`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba cancelación protegida',
+      appointmentDay.set({ hour: 16 }).toISO(),
+      appointmentDay.set({ hour: 16, minute: 45 }).toISO(),
+    ]
+  );
+  const appointmentId = inserted.rows[0].id;
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'wrong-create', name: 'create_appointment',
+        input: {
+          service_id: '22222222-2222-2222-2222-222222222201',
+          datetime_iso: appointmentDay.set({ hour: 17 }).toISO(),
+          client_name: 'No debe crearse',
+        },
+      }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'list-before-cancel', name: 'get_my_appointments', input: {} }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'cancel-real', name: 'cancel_appointment',
+        input: { appointment_id: appointmentId },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: '✅ Tu cita ha sido cancelada.' }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [
+        {
+          role: 'assistant',
+          content: 'Voy a cancelar tu cita de Uñas acrílicas. ¿Confirmas que deseas cancelarla?',
+        },
+        { role: 'user', content: 'Sí, cancélala' },
+      ],
+      client,
+    });
+
+    assert.strictEqual(reply, '✅ Tu cita ha sido cancelada.');
+    assert.strictEqual(client.calls.length, 4);
+    const blockedToolResult = client.calls[1].messages.find(
+      (message) => Array.isArray(message.content) &&
+        message.content.some((block) => block.tool_use_id === 'wrong-create')
+    );
+    assert.match(JSON.stringify(blockedToolResult), /cancelacion_pendiente/);
+
+    const stored = await db.query(
+      `SELECT client_name, status FROM appointments
+       WHERE business_id = $1 AND client_phone = $2
+       ORDER BY created_at`,
+      [business.id, clientPhone]
+    );
+    assert.deepStrictEqual(
+      stored.rows.map((row) => ({ client_name: row.client_name, status: row.status })),
+      [{ client_name: 'Prueba cancelación protegida', status: 'cancelled' }]
+    );
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
+test('no afirma una cancelación cuando cancel_appointment falla', async () => {
+  const appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 15 }).startOf('day');
+  const clientPhone = 'testclient-ai-cancel-error';
+  const inserted = await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')
+     RETURNING id`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba cancelación fallida',
+      appointmentDay.set({ hour: 16 }).toISO(),
+      appointmentDay.set({ hour: 16, minute: 45 }).toISO(),
+    ]
+  );
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'cancel-missing', name: 'cancel_appointment',
+        input: { appointment_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Tu cita ha sido cancelada.' }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'No pude cancelar la cita porque no pude identificarla.' }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [
+        { role: 'assistant', content: '¿Confirmas que deseas cancelar esta cita?' },
+        { role: 'user', content: 'Sí, confirmo' },
+      ],
+      client,
+    });
+
+    assert.strictEqual(reply, 'No pude cancelar la cita porque no pude identificarla.');
+    assert.strictEqual(client.calls.length, 3);
+    assert.ok(
+      client.calls[2].messages.some(
+        (message) => typeof message.content === 'string' && message.content.includes('cancel_appointment falló')
+      ),
+      'debe informar internamente el error real antes de responder'
+    );
+    const stored = await db.query('SELECT status FROM appointments WHERE id = $1', [inserted.rows[0].id]);
+    assert.strictEqual(stored.rows[0].status, 'confirmed');
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
 test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con una respuesta vacía', async () => {
   let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 12 }).startOf('day');
   if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
