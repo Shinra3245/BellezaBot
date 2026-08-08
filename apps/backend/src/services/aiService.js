@@ -43,6 +43,8 @@ async function buildSystem(business) {
     `- Solo puedes decir que una cita quedó confirmada, agendada o reservada si create_appointment devolvió ` +
     `ok=true en el turno actual. Si la tool devuelve un error, la cita NO existe: explica el problema real y nunca la confirmes.\n` +
     `- Para cancelar o reprogramar, usa get_my_appointments para identificar la cita y confirma la acción antes de ejecutarla.\n` +
+    `- Solo puedes decir que una cita fue reprogramada si reschedule_appointment devolvió ok=true ` +
+    `en el turno actual. Nunca crees una cita nueva para sustituir una reprogramación.\n` +
     `- Si la clienta pide cancelar, no consultes disponibilidad ni intentes crear o reprogramar. ` +
     `Usa get_my_appointments, solicita confirmación explícita y después usa únicamente cancel_appointment.\n` +
     `- Si la clienta rechaza un recordatorio, ayúdala a elegir un nuevo horario y usa reschedule_appointment; no crees una cita duplicada.\n` +
@@ -221,6 +223,11 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   let cancellationAttempted = false;
   let cancellationSucceeded = false;
   let cancellationError = null;
+  const rescheduleConfirmationRequired = !isAdmin && isRescheduleConfirmationTurn(history);
+  let rescheduleAttempted = false;
+  let rescheduleSucceeded = false;
+  let rescheduleError = null;
+  let rescheduleResult = null;
   const adminWeekSummaryRequired =
     isAdmin && Boolean(adminWeekReferenceDate);
   let adminAgendaResult = null;
@@ -262,6 +269,9 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             (block.name === 'check_availability' ||
               block.name === 'create_appointment' ||
               block.name === 'reschedule_appointment');
+          const toolBlockedByRescheduleConfirmation =
+            rescheduleConfirmationRequired &&
+            (block.name === 'create_appointment' || block.name === 'cancel_appointment');
           if (block.name === 'check_availability' && !toolBlockedByCancellation) {
             logger.info('[ai] Consulta de disponibilidad', {
               business_id: business.id,
@@ -278,25 +288,36 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
           // creación o reprogramación, como ocurrió en producción.
           const cancellationBlockedWithoutConfirmation =
             !isAdmin && block.name === 'cancel_appointment' && !cancellationConfirmationRequired;
-          if (toolBlockedByCancellation || cancellationBlockedWithoutConfirmation) {
-            const blockedError =
-              toolBlockedByCancellation &&
+          const rescheduleBlockedWithoutConfirmation =
+            !isAdmin && block.name === 'reschedule_appointment' && !rescheduleConfirmationRequired;
+          let blockedError = null;
+          let requiredAction = null;
+          if (toolBlockedByCancellation) {
+            blockedError =
               cancellationConfirmationRequired &&
               (block.name === 'create_appointment' || block.name === 'reschedule_appointment')
                 ? 'cancelacion_pendiente'
-                : toolBlockedByCancellation
-                  ? 'cancelacion_en_curso'
-                  : 'confirmacion_cancelacion_requerida';
+                : 'cancelacion_en_curso';
+            requiredAction = cancellationConfirmationRequired
+              ? 'cancel_appointment'
+              : 'get_my_appointments_y_solicitar_confirmacion';
+          } else if (toolBlockedByRescheduleConfirmation) {
+            blockedError = 'reprogramacion_en_curso';
+            requiredAction = 'reschedule_appointment';
+          } else if (cancellationBlockedWithoutConfirmation) {
+            blockedError = 'confirmacion_cancelacion_requerida';
+            requiredAction = 'solicitar_confirmacion';
+          } else if (rescheduleBlockedWithoutConfirmation) {
+            blockedError = 'confirmacion_reprogramacion_requerida';
+            requiredAction = 'solicitar_confirmacion';
+          }
+          if (blockedError) {
             result = JSON.stringify({
               ok: false,
               error: blockedError,
-              accion_requerida: toolBlockedByCancellation
-                ? cancellationConfirmationRequired
-                  ? 'cancel_appointment'
-                  : 'get_my_appointments_y_solicitar_confirmacion'
-                : 'solicitar_confirmacion',
+              accion_requerida: requiredAction,
             });
-            logger.warn('[ai] Herramienta bloqueada por seguridad de cancelación', {
+            logger.warn('[ai] Herramienta bloqueada por seguridad de flujo', {
               business_id: business.id,
               blocked_tool: block.name,
               reason: blockedError,
@@ -367,6 +388,20 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
               error: cancellationError || undefined,
             });
           }
+          if (block.name === 'reschedule_appointment') {
+            rescheduleAttempted = true;
+            const parsedResult = parseToolResult(result);
+            rescheduleSucceeded = parsedResult?.ok === true;
+            rescheduleError = rescheduleSucceeded
+              ? null
+              : parsedResult?.error || 'resultado_invalido';
+            rescheduleResult = rescheduleSucceeded ? parsedResult : null;
+            logger.info('[ai] Resultado de reprogramación de cita', {
+              business_id: business.id,
+              ok: rescheduleSucceeded,
+              error: rescheduleError || undefined,
+            });
+          }
           if (block.name === 'get_appointments') {
             let parsedResult;
             try {
@@ -417,6 +452,11 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             cancellationAttempted = true;
             cancellationSucceeded = false;
             cancellationError = 'error_interno';
+          }
+          if (block.name === 'reschedule_appointment') {
+            rescheduleAttempted = true;
+            rescheduleSucceeded = false;
+            rescheduleError = 'error_interno';
           }
           logger.error('[ai] Error ejecutando tool', { tool: block.name, error: err.message });
           result = JSON.stringify({ error: 'error_interno' });
@@ -556,6 +596,30 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       messages.push({ role: 'user', content: correction });
       continue;
     }
+    const falseRescheduleClaim =
+      !isAdmin && claimsAppointmentRescheduled(text) && !rescheduleSucceeded;
+    const missingConfirmedReschedule =
+      rescheduleConfirmationRequired && !rescheduleAttempted;
+    if (falseRescheduleClaim || missingConfirmedReschedule) {
+      messages.push({ role: 'assistant', content: resp.content });
+      let correction;
+      if (rescheduleConfirmationRequired && !rescheduleAttempted) {
+        correction =
+          'Corrección interna obligatoria: la clienta confirmó la nueva fecha y hora, pero todavía no ejecutaste ' +
+          'reschedule_appointment. Usa get_my_appointments si necesitas identificar la cita y ejecuta ' +
+          'reschedule_appointment. Solo confirma la reprogramación si devuelve ok=true; no crees otra cita.';
+      } else if (rescheduleAttempted && rescheduleError) {
+        correction =
+          `Corrección interna obligatoria: reschedule_appointment falló con ${rescheduleError}. ` +
+          'La cita conserva su horario anterior. Explica el problema real y no afirmes que fue reprogramada.';
+      } else {
+        correction =
+          'Corrección interna obligatoria: no existe un reschedule_appointment exitoso en este turno. ' +
+          'No afirmes que la cita fue reprogramada ni crees una cita nueva.';
+      }
+      messages.push({ role: 'user', content: correction });
+      continue;
+    }
     const missingAdminAgendaQuery = adminExpectedAgendaDate && !adminAgendaResult;
     const falseEmptyAdminAgenda =
       adminAgendaResult?.citas.length > 0 && claimsNoAppointments(text);
@@ -592,6 +656,12 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   }
   if (appointmentCreationAttempted && appointmentCreationError) {
     return formatAppointmentCreationError(appointmentCreationError);
+  }
+  if (rescheduleSucceeded && rescheduleResult) {
+    return formatRescheduledAppointment(rescheduleResult);
+  }
+  if (rescheduleAttempted && rescheduleError) {
+    return formatAppointmentRescheduleError(rescheduleError);
   }
   logger.warn('[ai] Límite de iteraciones de tool_use alcanzado', {
     business_id: business.id,
@@ -812,6 +882,28 @@ function isCancellationConfirmationTurn(history) {
   return false;
 }
 
+// Reconoce la aceptación explícita de los nuevos datos que el bot acaba de
+// presentar para mover una cita existente. Se mantiene separado de la creación
+// para que un "Sí" nunca genere una cita duplicada.
+function isRescheduleConfirmationTurn(history) {
+  const latestUserIndex = history.map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex < 0) return false;
+
+  const latestUser = normalizeForIntent(history[latestUserIndex].content);
+  if (!isAffirmativeReply(latestUser)) return false;
+
+  for (let i = latestUserIndex - 1; i >= 0; i--) {
+    if (history[i].role !== 'assistant') continue;
+    const previousAssistant = normalizeForIntent(history[i].content);
+    return (
+      /\b(cita|reservacion|turno)\b/.test(previousAssistant) &&
+      /\b(reprogram\w*|reagend\w*)\b/.test(previousAssistant) &&
+      /\b(confirm\w*|correcto|correcta)\b/.test(previousAssistant)
+    );
+  }
+  return false;
+}
+
 // Segunda barrera: aunque el modelo ignore el flujo, una confirmación falsa nunca sale a WhatsApp.
 function claimsAppointmentConfirmed(text) {
   const normalized = normalizeForIntent(text);
@@ -826,6 +918,15 @@ function claimsAppointmentCancelled(text) {
   return (
     /\b(cita|reservacion|turno)\b[\s\S]{0,100}\bcancelad[ao]\b/.test(normalized) ||
     /\bcancelad[ao]\b[\s\S]{0,100}\b(cita|reservacion|turno)\b/.test(normalized)
+  );
+}
+
+function claimsAppointmentRescheduled(text) {
+  const normalized = normalizeForIntent(text);
+  const rescheduled = '(?:reprogramad[ao]|reagendad[ao])';
+  return (
+    new RegExp(`\\b(cita|reservacion|turno)\\b[\\s\\S]{0,100}\\b${rescheduled}\\b`).test(normalized) ||
+    new RegExp(`\\b${rescheduled}\\b[\\s\\S]{0,100}\\b(cita|reservacion|turno)\\b`).test(normalized)
   );
 }
 
@@ -972,6 +1073,38 @@ function formatAppointmentCreationError(error) {
     fecha_invalida: 'No pude interpretar correctamente la fecha y la hora. ¿Me las indicas nuevamente? 😊',
   };
   return messages[error] || 'No pude completar la reservación. Verifiquemos nuevamente los datos. 🙏';
+}
+
+function formatRescheduledAppointment(result) {
+  return [
+    '✅ *Tu cita ha sido reprogramada*',
+    '',
+    `📅 *Nueva fecha y hora:* ${result.nuevo_horario}`,
+    '',
+    '¡Te esperamos! 😊',
+  ].join('\n');
+}
+
+function formatAppointmentRescheduleError(error) {
+  const messages = {
+    confirmacion_reprogramacion_requerida:
+      'Antes de mover la cita, necesito que confirmes la nueva fecha y hora. 😊',
+    cita_no_encontrada:
+      'No encontré esa cita activa. ¿Quieres que revisemos tus próximas citas? 😊',
+    slot_ocupado:
+      'Ese nuevo horario ya no está disponible porque se cruza con otra cita. ¿Elegimos otro? 😊',
+    fuera_de_horario:
+      'Ese nuevo horario queda fuera del horario de atención. ¿Elegimos otro? 😊',
+    slot_bloqueado:
+      'Ese nuevo horario está bloqueado. ¿Quieres que busquemos otro? 😊',
+    muy_pronto:
+      'Ese horario está demasiado próximo para reprogramar la cita. ¿Elegimos uno posterior? 😊',
+    fecha_fuera_de_ventana:
+      'Esa fecha queda fuera del periodo permitido para reservar. ¿Elegimos otra? 😊',
+    fecha_invalida:
+      'No pude interpretar correctamente la nueva fecha y hora. ¿Me las indicas nuevamente? 😊',
+  };
+  return messages[error] || 'No pude reprogramar la cita. Conservé su horario anterior para no perderla. 🙏';
 }
 
 function getExpectedAdminAgendaDate(history, timezone) {

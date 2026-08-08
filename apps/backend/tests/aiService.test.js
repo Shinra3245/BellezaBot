@@ -850,6 +850,123 @@ test('no afirma una cancelación cuando cancel_appointment falla', async () => {
   }
 });
 
+test('una confirmación de reprogramación actualiza la cita real y no crea duplicados', async () => {
+  let originalDay = DateTime.now().setZone(business.timezone).plus({ days: 17 }).startOf('day');
+  if (originalDay.weekday === 7) originalDay = originalDay.plus({ days: 1 });
+  let targetDay = originalDay.plus({ days: 1 });
+  if (targetDay.weekday === 7) targetDay = targetDay.plus({ days: 1 });
+
+  const clientPhone = 'testclient-ai-reschedule-guard';
+  const targetStart = targetDay.set({ hour: 11, minute: 30 });
+  const targetLabel = targetDay.setLocale('es').toFormat("cccc d 'de' LLLL");
+  const inserted = await db.query(
+    `INSERT INTO appointments
+       (business_id, service_id, client_phone, client_name, starts_at, ends_at, status, reminder_sent_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed', NOW())
+     RETURNING id`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba reprogramación protegida',
+      originalDay.set({ hour: 16 }).toISO(),
+      originalDay.set({ hour: 16, minute: 45 }).toISO(),
+    ]
+  );
+  const appointmentId = inserted.rows[0].id;
+  const finalMessage = '✅ Tu cita ha sido reprogramada para las 11:30 a. m.';
+  const client = fakeClient([
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: finalMessage }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'wrong-create-during-reschedule', name: 'create_appointment',
+        input: {
+          service_id: '22222222-2222-2222-2222-222222222201',
+          datetime_iso: targetStart.toISO(),
+          client_name: 'No debe duplicarse',
+        },
+      }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'list-before-reschedule', name: 'get_my_appointments', input: {} }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'reschedule-real', name: 'reschedule_appointment',
+        input: { appointment_id: appointmentId, new_datetime_iso: targetStart.toISO() },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: finalMessage }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [
+        {
+          role: 'assistant',
+          content:
+            `Confirmo los detalles de tu cita reprogramada para el ${targetLabel} a las 11:30 a. m. ` +
+            '¿Es correcto?',
+        },
+        { role: 'user', content: 'Sí' },
+      ],
+      client,
+    });
+
+    assert.strictEqual(reply, finalMessage);
+    assert.strictEqual(client.calls.length, 5);
+    assert.ok(
+      client.calls[1].messages.some(
+        (message) => typeof message.content === 'string' &&
+          message.content.includes('todavía no ejecutaste reschedule_appointment')
+      ),
+      'debe impedir una confirmación verbal sin haber actualizado la cita'
+    );
+    const blockedCreate = client.calls[2].messages.find(
+      (message) => Array.isArray(message.content) &&
+        message.content.some((block) => block.tool_use_id === 'wrong-create-during-reschedule')
+    );
+    assert.match(JSON.stringify(blockedCreate), /reprogramacion_en_curso/);
+
+    const stored = await db.query(
+      `SELECT id, client_name, status, starts_at, ends_at, reminder_sent_at
+       FROM appointments
+       WHERE business_id = $1 AND client_phone = $2
+       ORDER BY created_at`,
+      [business.id, clientPhone]
+    );
+    assert.strictEqual(stored.rows.length, 1, 'la reprogramación no debe insertar otra cita');
+    assert.strictEqual(stored.rows[0].id, appointmentId, 'debe conservar el ID de la cita original');
+    assert.strictEqual(stored.rows[0].client_name, 'Prueba reprogramación protegida');
+    assert.strictEqual(stored.rows[0].status, 'rescheduled');
+    assert.strictEqual(
+      DateTime.fromJSDate(stored.rows[0].starts_at).setZone(business.timezone).toFormat('yyyy-LL-dd HH:mm'),
+      targetStart.toFormat('yyyy-LL-dd HH:mm')
+    );
+    assert.strictEqual(
+      DateTime.fromJSDate(stored.rows[0].ends_at).setZone(business.timezone).toFormat('yyyy-LL-dd HH:mm'),
+      targetStart.plus({ minutes: 45 }).toFormat('yyyy-LL-dd HH:mm')
+    );
+    assert.strictEqual(stored.rows[0].reminder_sent_at, null, 'el nuevo horario debe permitir otro recordatorio');
+  } finally {
+    await db.query(
+      'DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2',
+      [business.id, clientPhone]
+    );
+  }
+});
+
 test('el modo admin consulta la fecha exacta y no puede ocultar citas reales con una respuesta vacía', async () => {
   let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 12 }).startOf('day');
   if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
