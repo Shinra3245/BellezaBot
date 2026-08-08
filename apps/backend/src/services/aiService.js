@@ -179,7 +179,15 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   const toolset = isAdmin ? adminTools : botTools;
   const system = isAdmin ? await buildAdminSystem(business) : await buildSystem(business);
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
-  const maxToolIterations = getMaxToolIterations(clientPhone);
+  const iterationProfile = getToolIterationProfile(clientPhone);
+  const maxToolIterations = iterationProfile.maxIterations;
+  logger.info('[ai] Perfil de iteraciones', {
+    business_id: business.id,
+    max_iterations: maxToolIterations,
+    extended: iterationProfile.extended,
+    configured_extended_phones: iterationProfile.configuredPhoneCount,
+    client_suffix: iterationProfile.clientSuffix,
+  });
   let availabilityDateNeedsCorrection = false;
   const requestedExactTime = !isAdmin ? getRequestedExactTime(history) : null;
   const requestedAvailabilityDate = !isAdmin
@@ -418,6 +426,16 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       });
       continue;
     }
+    // Si todavía falta el servicio, preguntar por él es la respuesta correcta:
+    // check_availability necesita service_id y no debe forzarse antes de obtenerlo.
+    const safeServiceClarification =
+      !isAdmin &&
+      ((exactAvailabilityRequired && !exactAvailabilityChecked) ||
+        (availabilityDateRequired && !availabilityDateChecked)) &&
+      asksForServiceSelection(text) &&
+      !claimsAvailability(text) &&
+      !claimsAppointmentConfirmed(text);
+    if (safeServiceClarification) return text;
     if (exactAvailabilityRequired && !exactAvailabilityChecked) {
       messages.push({ role: 'assistant', content: resp.content });
       messages.push({
@@ -524,7 +542,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   logger.warn('[ai] Límite de iteraciones de tool_use alcanzado', {
     business_id: business.id,
     max_iterations: maxToolIterations,
-    extended: maxToolIterations === env.AI_EXTENDED_MAX_TOOL_ITERATIONS,
+    extended: iterationProfile.extended,
   });
   return 'Dame un momento, en breve te atiendo 🙏';
 }
@@ -537,13 +555,29 @@ function normalizeForIntent(value) {
     .trim();
 }
 
-function getMaxToolIterations(clientPhone) {
-  const normalizedClient = whatsappService.normalizeRecipient(clientPhone);
-  const hasExtendedLimit = env.AI_EXTENDED_TOOL_PHONES.some(
-    (phone) => whatsappService.normalizeRecipient(phone) === normalizedClient
+function samePhoneNumber(left, right) {
+  const normalizedLeft = whatsappService.normalizeRecipient(left);
+  const normalizedRight = whatsappService.normalizeRecipient(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+  return (
+    normalizedLeft.length >= 10 &&
+    normalizedRight.length >= 10 &&
+    normalizedLeft.slice(-10) === normalizedRight.slice(-10)
   );
-  if (!hasExtendedLimit) return env.AI_MAX_TOOL_ITERATIONS;
-  return Math.max(env.AI_MAX_TOOL_ITERATIONS, env.AI_EXTENDED_MAX_TOOL_ITERATIONS);
+}
+
+function getToolIterationProfile(clientPhone) {
+  const normalizedClient = whatsappService.normalizeRecipient(clientPhone);
+  const extended = env.AI_EXTENDED_TOOL_PHONES.some((phone) => samePhoneNumber(phone, normalizedClient));
+  return {
+    extended,
+    maxIterations: extended
+      ? Math.max(env.AI_MAX_TOOL_ITERATIONS, env.AI_EXTENDED_MAX_TOOL_ITERATIONS)
+      : env.AI_MAX_TOOL_ITERATIONS,
+    configuredPhoneCount: env.AI_EXTENDED_TOOL_PHONES.length,
+    clientSuffix: normalizedClient.slice(-4) || 'none',
+  };
 }
 
 // Extrae únicamente horas explícitas del último mensaje de la clienta y las normaliza
@@ -577,6 +611,23 @@ function isAvailabilityCheckTurn(history) {
   return (
     /\b(agend\w*|reserv\w*|cita\w*|disponib\w*|horario\w*|hora\w*|dia)\b/.test(text) ||
     /\ba\s+las?\s+\d{1,2}\b/.test(text)
+  );
+}
+
+function asksForServiceSelection(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    /\b(cual|que)\b[\s\S]{0,50}\bservicio\b/.test(normalized) ||
+    /\bservicio\b[\s\S]{0,50}\b(prefieres|deseas|quieres|eliges|necesitas)\b/.test(normalized)
+  );
+}
+
+function claimsAvailability(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    /\b(hay|tenemos|existe) disponibilidad\b/.test(normalized) ||
+    /\b(horarios?|hora) disponibles?\b/.test(normalized) ||
+    /\b(esta|sigue) disponible\b/.test(normalized)
   );
 }
 

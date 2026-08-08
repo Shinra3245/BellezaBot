@@ -77,7 +77,9 @@ test('generateReply corta el texto vacío con un mensaje de cortesía', async ()
 test('un teléfono de QA usa el límite ampliado sin quedar ilimitado', async () => {
   const previousPhones = env.AI_EXTENDED_TOOL_PHONES;
   const previousExtendedLimit = env.AI_EXTENDED_MAX_TOOL_ITERATIONS;
-  env.AI_EXTENDED_TOOL_PHONES = ['525511223344'];
+  // Railway puede guardar solo los 10 dígitos nacionales mientras Meta entrega
+  // 521 + número; ambos formatos deben identificar al mismo teléfono.
+  env.AI_EXTENDED_TOOL_PHONES = ['5511223344'];
   env.AI_EXTENDED_MAX_TOOL_ITERATIONS = 12;
 
   const repeatedToolCalls = Array.from({ length: 6 }, (_, index) => ({
@@ -92,7 +94,7 @@ test('un teléfono de QA usa el límite ampliado sin quedar ilimitado', async ()
   try {
     const reply = await aiService.generateReply({
       business,
-      clientPhone: '+52 55 1122 3344',
+      clientPhone: '5215511223344',
       history: [{ role: 'user', content: 'Realiza una prueba extensa' }],
       client,
     });
@@ -102,6 +104,30 @@ test('un teléfono de QA usa el límite ampliado sin quedar ilimitado', async ()
     env.AI_EXTENDED_TOOL_PHONES = previousPhones;
     env.AI_EXTENDED_MAX_TOOL_ITERATIONS = previousExtendedLimit;
   }
+});
+
+test('si fecha y hora vienen sin servicio permite preguntarlo sin agotar iteraciones', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 4 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const monthName = appointmentDay.setLocale('es').toFormat('LLLL');
+  const question = 'Claro, ¿cuál servicio prefieres: Manicure, Pedicure o Uñas acrílicas? 😊';
+  const client = fakeClient([{
+    stop_reason: 'end_turn',
+    content: [{ type: 'text', text: question }],
+  }]);
+
+  const reply = await aiService.generateReply({
+    business,
+    clientPhone: 'testclient-ai-missing-service',
+    history: [{
+      role: 'user',
+      content: `Agenda una cita el día ${appointmentDay.day} de ${monthName} a las 10 am`,
+    }],
+    client,
+  });
+
+  assert.strictEqual(reply, question);
+  assert.strictEqual(client.calls.length, 1, 'debe aceptar la aclaración sin forzar check_availability');
 });
 
 test('el system prompt cachea el bloque estable y deja la fecha en un bloque volátil', async () => {
