@@ -37,8 +37,9 @@ function fakeTemplateSender() {
 }
 
 test('runOnce envía recordatorio de citas dentro de 24h y no las reenvía', async () => {
-  // Mismo horario local de mañana menos 30 minutos: está dentro de 24h y sí es "mañana".
-  const startsAt = DateTime.now().setZone(TZ).plus({ days: 1 }).minus({ minutes: 30 });
+  // El mismo horario local de mañana queda dentro de 24h en cuanto se ejecuta la consulta
+  // y siempre pertenece al día siguiente, incluso durante la primera media hora del día.
+  const startsAt = DateTime.now().setZone(TZ).plus({ days: 1 });
   const { rows } = await db.query(
     `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
      VALUES ($1, $2, $3, 'Ana', $4, $5, 'confirmed')

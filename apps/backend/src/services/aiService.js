@@ -4,10 +4,10 @@ const env = require('../config/env');
 const time = require('../utils/time');
 const logger = require('../utils/logger');
 const appointmentService = require('./appointmentService');
+const whatsappService = require('./whatsappService');
 const botTools = require('../tools/botTools');
 const adminTools = require('../tools/adminTools');
 
-const MAX_TOOL_ITERATIONS = 5;
 const MAX_TOKENS = 1024; // respuestas cortas estilo WhatsApp
 // Respuesta fija en modo mock (dev/pruebas sin gastar tokens ni depender de la red).
 const MOCK_REPLY = '¡Hola! Soy el asistente virtual (modo de prueba). ¿En qué te ayudo?';
@@ -179,16 +179,25 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   const toolset = isAdmin ? adminTools : botTools;
   const system = isAdmin ? await buildAdminSystem(business) : await buildSystem(business);
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
+  const maxToolIterations = getMaxToolIterations(clientPhone);
   let availabilityDateNeedsCorrection = false;
   const requestedExactTime = !isAdmin ? getRequestedExactTime(history) : null;
+  const requestedAvailabilityDate = !isAdmin
+    ? getExpectedClientAvailabilityDate(history, business.timezone)
+    : null;
   const exactAvailabilityRequired = Boolean(
     requestedExactTime && isAvailabilityCheckTurn(history)
   );
+  const availabilityDateRequired = Boolean(
+    requestedAvailabilityDate && isAvailabilityCheckTurn(history)
+  );
   let exactAvailabilityChecked = false;
+  let availabilityDateChecked = false;
   const appointmentConfirmationRequired = !isAdmin && isAppointmentConfirmationTurn(history);
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
   let appointmentCreationError = null;
+  let appointmentCreationResult = null;
   const cancellationConfirmationRequired = !isAdmin && isCancellationConfirmationTurn(history);
   let cancellationAttempted = false;
   let cancellationSucceeded = false;
@@ -199,7 +208,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   let adminWeekResult = null;
   let adminDirectReply = null;
 
-  for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+  for (let i = 0; i < maxToolIterations; i++) {
     const resp = await anthropic.messages.create({
       model: env.ANTHROPIC_MODEL,
       max_tokens: MAX_TOKENS,
@@ -214,15 +223,27 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
         if (block.type !== 'tool_use') continue;
         let result;
         try {
+          logger.info('[ai] Ejecutando herramienta', {
+            business_id: business.id,
+            tool: block.name,
+            iteration: i + 1,
+            max_iterations: maxToolIterations,
+          });
           // La hora escrita por la clienta tiene prioridad sobre la interpretación de la IA.
           // Así una consulta por "6:00 pm" nunca puede degradarse a una lista general del día.
-          const toolInput = block.name === 'check_availability' && requestedExactTime
-            ? { ...block.input, preferred_time: requestedExactTime }
+          const toolInput = block.name === 'check_availability'
+            ? {
+                ...block.input,
+                ...(requestedAvailabilityDate ? { date: requestedAvailabilityDate } : {}),
+                ...(requestedExactTime ? { preferred_time: requestedExactTime } : {}),
+              }
             : block.input;
           if (block.name === 'check_availability') {
             logger.info('[ai] Consulta de disponibilidad', {
               business_id: business.id,
               date: toolInput?.date,
+              requested_date: requestedAvailabilityDate || undefined,
+              model_date: block.input?.date,
               requested_time: requestedExactTime || undefined,
               model_preferred_time: block.input?.preferred_time,
               effective_preferred_time: toolInput?.preferred_time,
@@ -266,6 +287,10 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             exactAvailabilityChecked = Boolean(
               requestedExactTime && parsedResult?.hora_solicitada === requestedExactTime
             );
+            availabilityDateChecked = Boolean(
+              requestedAvailabilityDate &&
+              parsedResult?.fecha_solicitada === requestedAvailabilityDate
+            );
             availabilityDateNeedsCorrection = parsedResult?.nota === 'fecha_pasada';
             if (
               requestedExactTime &&
@@ -291,6 +316,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             if (parsedResult?.ok === true) {
               appointmentCreated = true;
               appointmentCreationError = null;
+              appointmentCreationResult = parsedResult;
             } else if (!appointmentCreated) {
               appointmentCreationError = parsedResult?.error || 'resultado_invalido';
             }
@@ -403,6 +429,16 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       });
       continue;
     }
+    if (availabilityDateRequired && !availabilityDateChecked) {
+      messages.push({ role: 'assistant', content: resp.content });
+      messages.push({
+        role: 'user',
+        content:
+          `Corrección interna obligatoria: la clienta eligió la fecha ${requestedAvailabilityDate}, ` +
+          'pero no ejecutaste check_availability para esa fecha en este turno. Consulta esa fecha exacta antes de responder.',
+      });
+      continue;
+    }
     // Esta barrera pertenece solo al flujo de clientas. En modo admin es normal describir
     // una cita existente con estado "confirmada" y eso nunca debe activar create_appointment.
     const falseConfirmationClaim = !isAdmin && claimsAppointmentConfirmed(text) && !appointmentCreated;
@@ -474,7 +510,22 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   }
 
   // Se agotaron las iteraciones de tools sin respuesta final.
-  logger.warn('[ai] Límite de iteraciones de tool_use alcanzado', { business_id: business.id });
+  if (appointmentCreated && appointmentCreationResult) {
+    logger.info('[ai] Creación confirmada al alcanzar el límite de iteraciones', {
+      business_id: business.id,
+      appointment_id: appointmentCreationResult.cita_id,
+      max_iterations: maxToolIterations,
+    });
+    return formatCreatedAppointment(appointmentCreationResult);
+  }
+  if (appointmentCreationAttempted && appointmentCreationError) {
+    return formatAppointmentCreationError(appointmentCreationError);
+  }
+  logger.warn('[ai] Límite de iteraciones de tool_use alcanzado', {
+    business_id: business.id,
+    max_iterations: maxToolIterations,
+    extended: maxToolIterations === env.AI_EXTENDED_MAX_TOOL_ITERATIONS,
+  });
   return 'Dame un momento, en breve te atiendo 🙏';
 }
 
@@ -484,6 +535,15 @@ function normalizeForIntent(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function getMaxToolIterations(clientPhone) {
+  const normalizedClient = whatsappService.normalizeRecipient(clientPhone);
+  const hasExtendedLimit = env.AI_EXTENDED_TOOL_PHONES.some(
+    (phone) => whatsappService.normalizeRecipient(phone) === normalizedClient
+  );
+  if (!hasExtendedLimit) return env.AI_MAX_TOOL_ITERATIONS;
+  return Math.max(env.AI_MAX_TOOL_ITERATIONS, env.AI_EXTENDED_MAX_TOOL_ITERATIONS);
 }
 
 // Extrae únicamente horas explícitas del último mensaje de la clienta y las normaliza
@@ -514,7 +574,10 @@ function isAvailabilityCheckTurn(history) {
   const latestUser = [...history].reverse().find((message) => message.role === 'user');
   if (!latestUser) return false;
   const text = normalizeForIntent(latestUser.content);
-  return /\b(agend\w*|reserv\w*|cita\w*|disponib\w*|horario\w*|hora\w*)\b/.test(text);
+  return (
+    /\b(agend\w*|reserv\w*|cita\w*|disponib\w*|horario\w*|hora\w*|dia)\b/.test(text) ||
+    /\ba\s+las?\s+\d{1,2}\b/.test(text)
+  );
 }
 
 function formatExactTimeUnavailable(requestedTime) {
@@ -609,6 +672,101 @@ const SPANISH_MONTHS = {
   noviembre: 11,
   diciembre: 12,
 };
+
+function parseClientDate(value, timezone) {
+  const text = normalizeForIntent(value);
+  const now = time.nowInZone(timezone).startOf('day');
+  const isoMatch = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (isoMatch) {
+    const parsed = time.startOfDay(isoMatch[1], timezone);
+    return parsed.isValid ? parsed : null;
+  }
+
+  const namedDate = text.match(
+    /\b(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:\s+(?:de|del)\s+(\d{4}))?\b/
+  );
+  if (!namedDate) return null;
+
+  const explicitYear = namedDate[3] ? Number(namedDate[3]) : null;
+  let parsed = time.DateTime.fromObject(
+    {
+      year: explicitYear || now.year,
+      month: SPANISH_MONTHS[namedDate[2]],
+      day: Number(namedDate[1]),
+    },
+    { zone: timezone }
+  ).startOf('day');
+  if (!parsed.isValid) return null;
+  if (!explicitYear && parsed < now) parsed = parsed.plus({ years: 1 });
+  return parsed;
+}
+
+function nextDateWithDayOfMonth(day, timezone) {
+  const now = time.nowInZone(timezone).startOf('day');
+  for (let monthOffset = 0; monthOffset <= 12; monthOffset++) {
+    const month = now.plus({ months: monthOffset }).startOf('month');
+    const candidate = month.set({ day });
+    if (candidate.isValid && candidate >= now) return candidate;
+  }
+  return null;
+}
+
+// Conserva la fecha elegida por la clienta aunque responda de forma corta, por
+// ejemplo «Sí, el día 10», tomando el mes del mensaje inmediatamente anterior.
+function getExpectedClientAvailabilityDate(history, timezone) {
+  const latestUserIndex = history.map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex < 0) return null;
+
+  const latestText = normalizeForIntent(history[latestUserIndex].content);
+  const directDate = parseClientDate(latestText, timezone);
+  if (directDate) return directDate.toFormat('yyyy-LL-dd');
+
+  const dayReference = latestText.match(/\bdia\s+(\d{1,2})\b/);
+  const referencedDay = dayReference ? Number(dayReference[1]) : null;
+  const isContinuation = Boolean(
+    referencedDay ||
+    isAffirmativeReply(latestText) ||
+    /\ba\s+las?\s+\d{1,2}\b/.test(latestText)
+  );
+  if (!isContinuation) return null;
+
+  for (let i = latestUserIndex - 1; i >= 0; i--) {
+    if (history[i].role !== 'assistant') continue;
+    const previousDate = parseClientDate(history[i].content, timezone);
+    if (previousDate && (!referencedDay || previousDate.day === referencedDay)) {
+      return previousDate.toFormat('yyyy-LL-dd');
+    }
+    break;
+  }
+
+  const inferred = referencedDay ? nextDateWithDayOfMonth(referencedDay, timezone) : null;
+  return inferred ? inferred.toFormat('yyyy-LL-dd') : null;
+}
+
+function formatCreatedAppointment(result) {
+  const lines = [
+    '🎉 *Tu cita está confirmada*',
+    '',
+    `💅 *Servicio:* ${result.servicio}`,
+    `📅 *Fecha y hora:* ${result.cuando}`,
+  ];
+  if (result.precio !== undefined) lines.push(`💰 *Precio:* $${result.precio}`);
+  lines.push('', '¡Te esperamos! 😊');
+  return lines.join('\n');
+}
+
+function formatAppointmentCreationError(error) {
+  const messages = {
+    slot_ocupado: 'Ese horario ya no está disponible porque se cruza con otra cita. ¿Quieres elegir otro? 😊',
+    fuera_de_horario: 'Ese horario queda fuera del horario de atención. ¿Quieres que busquemos otro? 😊',
+    slot_bloqueado: 'Ese horario está bloqueado. ¿Quieres que busquemos otro? 😊',
+    muy_pronto: 'Ese horario está demasiado próximo para reservarlo. ¿Quieres elegir uno posterior? 😊',
+    fecha_fuera_de_ventana: 'Esa fecha queda fuera del periodo permitido para reservar. ¿Elegimos otra? 😊',
+    servicio_no_encontrado: 'No pude identificar el servicio seleccionado. ¿Me indicas nuevamente cuál deseas? 😊',
+    fecha_invalida: 'No pude interpretar correctamente la fecha y la hora. ¿Me las indicas nuevamente? 😊',
+  };
+  return messages[error] || 'No pude completar la reservación. Verifiquemos nuevamente los datos. 🙏';
+}
 
 function getExpectedAdminAgendaDate(history, timezone) {
   const latestUser = [...history].reverse().find((message) => message.role === 'user');

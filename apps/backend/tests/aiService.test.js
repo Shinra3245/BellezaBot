@@ -2,6 +2,7 @@ const { test, after } = require('node:test');
 const assert = require('node:assert');
 const { DateTime } = require('luxon');
 const db = require('../src/config/db');
+const env = require('../src/config/env');
 const aiService = require('../src/services/aiService');
 
 after(async () => {
@@ -71,6 +72,36 @@ test('generateReply corta el texto vacío con un mensaje de cortesía', async ()
     business, clientPhone: 'testclient-ai', history: [{ role: 'user', content: 'hola' }], client,
   });
   assert.ok(reply.length > 0);
+});
+
+test('un teléfono de QA usa el límite ampliado sin quedar ilimitado', async () => {
+  const previousPhones = env.AI_EXTENDED_TOOL_PHONES;
+  const previousExtendedLimit = env.AI_EXTENDED_MAX_TOOL_ITERATIONS;
+  env.AI_EXTENDED_TOOL_PHONES = ['525511223344'];
+  env.AI_EXTENDED_MAX_TOOL_ITERATIONS = 12;
+
+  const repeatedToolCalls = Array.from({ length: 6 }, (_, index) => ({
+    stop_reason: 'tool_use',
+    content: [{ type: 'tool_use', id: `services-${index}`, name: 'get_service_info', input: {} }],
+  }));
+  const client = fakeClient([
+    ...repeatedToolCalls,
+    { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Flujo de QA completado.' }] },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone: '+52 55 1122 3344',
+      history: [{ role: 'user', content: 'Realiza una prueba extensa' }],
+      client,
+    });
+    assert.strictEqual(reply, 'Flujo de QA completado.');
+    assert.strictEqual(client.calls.length, 7);
+  } finally {
+    env.AI_EXTENDED_TOOL_PHONES = previousPhones;
+    env.AI_EXTENDED_MAX_TOOL_ITERATIONS = previousExtendedLimit;
+  }
 });
 
 test('el system prompt cachea el bloque estable y deja la fecha en un bloque volátil', async () => {
@@ -157,6 +188,74 @@ test('obliga a consultar la hora exacta y rechaza el empalme aunque la IA intent
         (message) => typeof message.content === 'string' && message.content.includes('no ejecutaste check_availability')
       ),
       'debe bloquear la solicitud del nombre y forzar una consulta real'
+    );
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
+test('al elegir otro día fuerza la fecha nueva y excluye la cita que ya ocupa ese horario', async () => {
+  let targetDay = DateTime.now().setZone(business.timezone).plus({ days: 10 }).startOf('day');
+  while (targetDay.weekday !== 1) targetDay = targetDay.plus({ days: 1 });
+  const wrongDay = targetDay.minus({ days: 1 });
+  const clientPhone = 'testclient-ai-date-change';
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Horario ya ocupado',
+      targetDay.set({ hour: 10 }).toISO(),
+      targetDay.set({ hour: 10, minute: 45 }).toISO(),
+    ]
+  );
+  const monthName = targetDay.setLocale('es').toFormat('LLLL');
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'wrong-date', name: 'check_availability',
+        input: {
+          date: wrongDay.toFormat('yyyy-LL-dd'),
+          service_id: '22222222-2222-2222-2222-222222222201',
+        },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Estos son los horarios disponibles del día correcto.' }],
+    },
+  ]);
+
+  try {
+    await aiService.generateReply({
+      business,
+      clientPhone: 'client-selecting-new-date',
+      history: [
+        {
+          role: 'assistant',
+          content: `Puedo ofrecerte el lunes ${targetDay.day} de ${monthName}. ¿Te queda bien?`,
+        },
+        { role: 'user', content: `Sí, el día ${targetDay.day} está bien` },
+      ],
+      client,
+    });
+
+    const resultMessage = client.calls[1].messages.find(
+      (message) => Array.isArray(message.content) &&
+        message.content.some((block) => block.tool_use_id === 'wrong-date')
+    );
+    const resultBlock = resultMessage.content.find((block) => block.tool_use_id === 'wrong-date');
+    const availability = JSON.parse(resultBlock.content);
+    assert.strictEqual(availability.fecha_solicitada, targetDay.toFormat('yyyy-LL-dd'));
+    assert.ok(
+      availability.disponibilidad.every((slot) => {
+        const startsAt = DateTime.fromISO(slot.datetime_iso).setZone(business.timezone);
+        return startsAt.hour !== 10 || startsAt.minute !== 0;
+      }),
+      'el horario de las 10:00 ocupado no debe volver a ofrecerse'
     );
   } finally {
     await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
@@ -262,6 +361,64 @@ test('si create_appointment falla, bloquea la confirmación falsa y comunica el 
     ),
     'debe informar internamente el error real antes de responder'
   );
+});
+
+test('si se agota el límite después de un empalme responde el error real y no el mensaje genérico', async () => {
+  const previousLimit = env.AI_MAX_TOOL_ITERATIONS;
+  env.AI_MAX_TOOL_ITERATIONS = 1;
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 9 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const existingPhone = 'testclient-ai-limit-overlap-existing';
+  const requestingPhone = 'testclient-ai-limit-overlap-new';
+  await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      existingPhone,
+      'Cita existente',
+      appointmentDay.set({ hour: 10 }).toISO(),
+      appointmentDay.set({ hour: 10, minute: 45 }).toISO(),
+    ]
+  );
+  const client = fakeClient([{
+    stop_reason: 'tool_use',
+    content: [{
+      type: 'tool_use', id: 'create-overlap-at-limit', name: 'create_appointment',
+      input: {
+        service_id: '22222222-2222-2222-2222-222222222201',
+        datetime_iso: appointmentDay.set({ hour: 10 }).toISO(),
+        client_name: 'No debe duplicarse',
+      },
+    }],
+  }]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone: requestingPhone,
+      history: [
+        { role: 'assistant', content: '¿Todo correcto? ¿Confirmo tu cita de Manicure?' },
+        { role: 'user', content: 'Sí, confirmo' },
+      ],
+      client,
+    });
+
+    assert.match(reply, /ya no está disponible/);
+    assert.doesNotMatch(reply, /Dame un momento/);
+    const duplicates = await db.query(
+      'SELECT count(*)::int AS total FROM appointments WHERE business_id = $1 AND client_phone = $2',
+      [business.id, requestingPhone]
+    );
+    assert.strictEqual(duplicates.rows[0].total, 0);
+  } finally {
+    env.AI_MAX_TOOL_ITERATIONS = previousLimit;
+    await db.query(
+      'DELETE FROM appointments WHERE business_id = $1 AND client_phone = ANY($2)',
+      [business.id, [existingPhone, requestingPhone]]
+    );
+  }
 });
 
 test('no ejecuta cancel_appointment antes de pedir confirmación explícita', async () => {
@@ -538,27 +695,17 @@ test('la siguiente semana se consulta directamente y se formatea sin tablas ni d
   }
 });
 
-test('no entrega una respuesta de no disponibilidad hasta corregir una fecha pasada', async () => {
+test('corrige el año de una fecha pasada antes de consultar disponibilidad', async () => {
   let future = DateTime.now().setZone(business.timezone).plus({ days: 10 }).startOf('day');
   if (future.weekday === 7) future = future.plus({ days: 1 });
   const futureDate = future.toFormat('yyyy-MM-dd');
+  const monthName = future.setLocale('es').toFormat('LLLL');
   const client = fakeClient([
     {
       stop_reason: 'tool_use',
       content: [{
         type: 'tool_use', id: 'past-date', name: 'check_availability',
         input: { date: '2024-08-10', service_id: '22222222-2222-2222-2222-222222222201' },
-      }],
-    },
-    {
-      stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'No hay disponibilidad.' }],
-    },
-    {
-      stop_reason: 'tool_use',
-      content: [{
-        type: 'tool_use', id: 'future-date', name: 'check_availability',
-        input: { date: futureDate, service_id: '22222222-2222-2222-2222-222222222201' },
       }],
     },
     {
@@ -570,21 +717,16 @@ test('no entrega una respuesta de no disponibilidad hasta corregir una fecha pas
   const reply = await aiService.generateReply({
     business,
     clientPhone: 'testclient-ai',
-    history: [{ role: 'user', content: 'Quiero agendar el 10 de agosto' }],
+    history: [{ role: 'user', content: `Quiero agendar el ${future.day} de ${monthName}` }],
     client,
   });
 
   assert.strictEqual(reply, 'Sí hay horarios disponibles.');
-  assert.strictEqual(client.calls.length, 4);
+  assert.strictEqual(client.calls.length, 2);
   const firstToolResult = client.calls[1].messages
     .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
     .find((block) => block.type === 'tool_result' && block.tool_use_id === 'past-date');
-  assert.match(firstToolResult.content, /fecha_pasada/);
-  assert.match(firstToolResult.content, /fecha_actual/);
-  assert.ok(
-    client.calls[2].messages.some(
-      (message) => typeof message.content === 'string' && message.content.includes('Corrección interna obligatoria')
-    ),
-    'debe forzar una nueva consulta antes de responder'
-  );
+  const availability = JSON.parse(firstToolResult.content);
+  assert.strictEqual(availability.fecha_solicitada, futureDate);
+  assert.notStrictEqual(availability.nota, 'fecha_pasada');
 });

@@ -16,6 +16,13 @@ function positiveIntegerFromEnv(name, fallback) {
   return value;
 }
 
+function commaSeparatedValues(name) {
+  return String(process.env[name] || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 const REQUIRED = ['DATABASE_URL'];
 if (nodeEnv === 'production') {
   REQUIRED.push('JWT_SECRET', 'FRONTEND_URL');
@@ -75,6 +82,12 @@ const env = {
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
   // 'real' llama a la API de Anthropic; 'mock' devuelve una respuesta fija (dev/pruebas sin gastar tokens).
   AI_MODE: aiMode,
+
+  // El límite evita ciclos costosos. Los teléfonos permitidos para QA reciben
+  // un margen mayor, pero nunca quedan sin una cota de seguridad.
+  AI_MAX_TOOL_ITERATIONS: positiveIntegerFromEnv('AI_MAX_TOOL_ITERATIONS', 5),
+  AI_EXTENDED_MAX_TOOL_ITERATIONS: positiveIntegerFromEnv('AI_EXTENDED_MAX_TOOL_ITERATIONS', 12),
+  AI_EXTENDED_TOOL_PHONES: commaSeparatedValues('AI_EXTENDED_TOOL_PHONES'),
 
   CLIENT_RATE_LIMIT_PER_HOUR: positiveIntegerFromEnv('CLIENT_RATE_LIMIT_PER_HOUR', 30),
 
