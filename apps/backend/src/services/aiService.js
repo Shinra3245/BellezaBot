@@ -51,6 +51,8 @@ async function buildSystem(business) {
     `el año actual si aún no ha pasado o el siguiente si ya pasó. Nunca selecciones un año anterior.\n` +
     `- Si check_availability devuelve fecha_pasada, corrige la fecha y vuelve a ejecutar la tool antes de responder. ` +
     `Nunca presentes fecha_pasada como si el negocio estuviera cerrado o sin disponibilidad.\n` +
+    `- Solo puedes decir que el negocio está cerrado en una fecha si check_availability devolvió ` +
+    `nota=cerrado_ese_dia para esa fecha en el turno actual.\n` +
     `- Escribe en español, mensajes cortos y cálidos estilo WhatsApp. Usa algún emoji con moderación.\n` +
     `- Si no entiendes o falta información, pregunta de forma breve.`;
 
@@ -189,18 +191,20 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
     client_suffix: iterationProfile.clientSuffix,
   });
   let availabilityDateNeedsCorrection = false;
+  const bookingDetailsContinuation = !isAdmin && isBookingDetailsContinuation(history);
   const requestedExactTime = !isAdmin ? getRequestedExactTime(history) : null;
   const requestedAvailabilityDate = !isAdmin
     ? getExpectedClientAvailabilityDate(history, business.timezone)
     : null;
   const exactAvailabilityRequired = Boolean(
-    requestedExactTime && isAvailabilityCheckTurn(history)
+    requestedExactTime && (isAvailabilityCheckTurn(history) || bookingDetailsContinuation)
   );
   const availabilityDateRequired = Boolean(
-    requestedAvailabilityDate && isAvailabilityCheckTurn(history)
+    requestedAvailabilityDate && (isAvailabilityCheckTurn(history) || bookingDetailsContinuation)
   );
   let exactAvailabilityChecked = false;
   let availabilityDateChecked = false;
+  let lastAvailabilityResult = null;
   const appointmentConfirmationRequired = !isAdmin && isAppointmentConfirmationTurn(history);
   let appointmentCreationAttempted = false;
   let appointmentCreated = false;
@@ -292,6 +296,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
             } catch {
               parsedResult = null;
             }
+            lastAvailabilityResult = parsedResult;
             exactAvailabilityChecked = Boolean(
               requestedExactTime && parsedResult?.hora_solicitada === requestedExactTime
             );
@@ -457,6 +462,23 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       });
       continue;
     }
+    if (!isAdmin && claimsBusinessClosed(text)) {
+      const verifiedClosed = Boolean(
+        availabilityDateChecked && lastAvailabilityResult?.nota === 'cerrado_ese_dia'
+      );
+      if (!verifiedClosed) {
+        messages.push({ role: 'assistant', content: resp.content });
+        messages.push({
+          role: 'user',
+          content:
+            `Corrección interna obligatoria: no puedes afirmar que el negocio está cerrado ` +
+            `${requestedAvailabilityDate ? `el ${requestedAvailabilityDate} ` : ''}` +
+            'sin que check_availability devuelva nota=cerrado_ese_dia para esa fecha en este turno. ' +
+            'Consulta la disponibilidad real y responde usando únicamente ese resultado.',
+        });
+        continue;
+      }
+    }
     // Esta barrera pertenece solo al flujo de clientas. En modo admin es normal describir
     // una cita existente con estado "confirmada" y eso nunca debe activar create_appointment.
     const falseConfirmationClaim = !isAdmin && claimsAppointmentConfirmed(text) && !appointmentCreated;
@@ -580,13 +602,10 @@ function getToolIterationProfile(clientPhone) {
   };
 }
 
-// Extrae únicamente horas explícitas del último mensaje de la clienta y las normaliza
-// a HH:MM. Acepta formatos comunes de WhatsApp: 6:00 pm, 6:00 p. m. y 18:00.
-function getRequestedExactTime(history) {
-  const latestUser = [...history].reverse().find((message) => message.role === 'user');
-  if (!latestUser) return null;
-  const text = normalizeForIntent(latestUser.content);
-
+// Normaliza una hora explícita a HH:MM. Acepta formatos comunes de WhatsApp:
+// 6:00 pm, 6:00 p. m. y 18:00.
+function parseRequestedExactTime(value) {
+  const text = normalizeForIntent(value);
   const twelveHour = text.match(
     /\b(\d{1,2})(?:\s*[:;]\s*([0-5]\d))?\s*([ap])\.?\s*m\.?\b/
   );
@@ -602,6 +621,20 @@ function getRequestedExactTime(history) {
   const twentyFourHour = text.match(/\b(?:a\s+las?\s+)?([01]?\d|2[0-3])\s*[:;]\s*([0-5]\d)\b/);
   if (!twentyFourHour) return null;
   return `${String(Number(twentyFourHour[1])).padStart(2, '0')}:${twentyFourHour[2]}`;
+}
+
+// La hora más reciente puede estar en el mensaje actual de la clienta o en la
+// pregunta inmediatamente anterior del bot cuando ella solo responde servicio/nombre.
+function getRequestedExactTime(history) {
+  const latestUserIndex = history.map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex < 0) return null;
+
+  const directTime = parseRequestedExactTime(history[latestUserIndex].content);
+  if (directTime) return directTime;
+  if (!isBookingDetailsContinuation(history)) return null;
+
+  const previousAssistant = getPreviousAssistantMessage(history, latestUserIndex);
+  return previousAssistant ? parseRequestedExactTime(previousAssistant.content) : null;
 }
 
 function isAvailabilityCheckTurn(history) {
@@ -622,12 +655,44 @@ function asksForServiceSelection(text) {
   );
 }
 
+function asksForBookingDetails(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    asksForServiceSelection(text) ||
+    /\b(a nombre de quien|cual es tu nombre|cual es el nombre|necesito tu nombre|que nombre)\b/.test(normalized) ||
+    /\bnombre\b[\s\S]{0,45}\b(agendo|registro|reservacion|cita)\b/.test(normalized)
+  );
+}
+
+function getPreviousAssistantMessage(history, latestUserIndex) {
+  for (let i = latestUserIndex - 1; i >= 0; i--) {
+    if (history[i].role === 'assistant') return history[i];
+    if (history[i].role === 'user') break;
+  }
+  return null;
+}
+
+function isBookingDetailsContinuation(history) {
+  const latestUserIndex = history.map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex < 0) return false;
+  const previousAssistant = getPreviousAssistantMessage(history, latestUserIndex);
+  return Boolean(previousAssistant && asksForBookingDetails(previousAssistant.content));
+}
+
 function claimsAvailability(text) {
   const normalized = normalizeForIntent(text);
   return (
     /\b(hay|tenemos|existe) disponibilidad\b/.test(normalized) ||
     /\b(horarios?|hora) disponibles?\b/.test(normalized) ||
     /\b(esta|sigue) disponible\b/.test(normalized)
+  );
+}
+
+function claimsBusinessClosed(text) {
+  const normalized = normalizeForIntent(text);
+  return (
+    /\b(negocio|estetica|salon|local)\b[\s\S]{0,60}\bcerrad[ao]\b/.test(normalized) ||
+    /\bcerrad[ao]\b[\s\S]{0,60}\b(ese dia|el dia|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b/.test(normalized)
   );
 }
 
@@ -777,7 +842,8 @@ function getExpectedClientAvailabilityDate(history, timezone) {
   const isContinuation = Boolean(
     referencedDay ||
     isAffirmativeReply(latestText) ||
-    /\ba\s+las?\s+\d{1,2}\b/.test(latestText)
+    /\ba\s+las?\s+\d{1,2}\b/.test(latestText) ||
+    isBookingDetailsContinuation(history)
   );
   if (!isContinuation) return null;
 

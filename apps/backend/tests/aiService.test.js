@@ -130,6 +130,84 @@ test('si fecha y hora vienen sin servicio permite preguntarlo sin agotar iteraci
   assert.strictEqual(client.calls.length, 1, 'debe aceptar la aclaración sin forzar check_availability');
 });
 
+test('conserva fecha y hora al recibir servicio y nombre antes de verificar disponibilidad', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 7 }).startOf('day');
+  while (appointmentDay.weekday !== 6) appointmentDay = appointmentDay.plus({ days: 1 });
+  const date = appointmentDay.toFormat('yyyy-LL-dd');
+  const dateLabel = appointmentDay.setLocale('es').toFormat("cccc d 'de' LLLL");
+  const falseClosedReply = `Lamento, el negocio está cerrado el ${dateLabel}.`;
+  const finalReply = 'La hora está disponible. ¿Confirmas los datos de tu cita? 😊';
+  const client = fakeClient([
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: falseClosedReply }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use',
+        id: 'availability-after-details',
+        name: 'check_availability',
+        input: {
+          date: appointmentDay.plus({ days: 1 }).toFormat('yyyy-LL-dd'),
+          service_id: '22222222-2222-2222-2222-222222222203',
+        },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: falseClosedReply }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: finalReply }],
+    },
+  ]);
+
+  const reply = await aiService.generateReply({
+    business,
+    clientPhone: 'testclient-ai-booking-details',
+    history: [
+      {
+        role: 'assistant',
+        content:
+          `Para agendar el ${dateLabel} a las 10:00 a. m., ¿qué servicio prefieres? ` +
+          '¿A nombre de quién registro la cita?',
+      },
+      { role: 'user', content: 'Uñas acrílicas, a nombre de Prueba cierre' },
+    ],
+    client,
+  });
+
+  assert.strictEqual(reply, finalReply);
+  assert.strictEqual(client.calls.length, 4);
+  assert.ok(
+    client.calls[1].messages.some(
+      (message) => typeof message.content === 'string' && message.content.includes('preferred_time=10:00')
+    ),
+    'debe recuperar la hora del mensaje anterior y forzar la consulta exacta'
+  );
+
+  const resultMessage = client.calls[2].messages.find(
+    (message) => Array.isArray(message.content) &&
+      message.content.some((block) => block.tool_use_id === 'availability-after-details')
+  );
+  const resultBlock = resultMessage.content.find(
+    (block) => block.tool_use_id === 'availability-after-details'
+  );
+  const availability = JSON.parse(resultBlock.content);
+  assert.strictEqual(availability.fecha_solicitada, date);
+  assert.strictEqual(availability.hora_solicitada, '10:00');
+  assert.notStrictEqual(availability.nota, 'cerrado_ese_dia');
+  assert.ok(availability.disponibilidad.length > 0, 'el sábado configurado debe tener disponibilidad');
+  assert.ok(
+    client.calls[3].messages.some(
+      (message) => typeof message.content === 'string' && message.content.includes('nota=cerrado_ese_dia')
+    ),
+    'debe bloquear una afirmación de cierre que contradice el resultado real'
+  );
+});
+
 test('el system prompt cachea el bloque estable y deja la fecha en un bloque volátil', async () => {
   let captured;
   const client = {
