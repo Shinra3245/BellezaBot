@@ -578,6 +578,84 @@ test('si se agota el límite después de un empalme responde el error real y no 
   }
 });
 
+test('cancelar una cita con fecha y hora no activa el flujo de disponibilidad', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 12 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const clientPhone = 'testclient-ai-cancel-with-datetime';
+  const inserted = await db.query(
+    `INSERT INTO appointments (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')
+     RETURNING id`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222203',
+      clientPhone,
+      'Prueba cancelación con fecha',
+      appointmentDay.set({ hour: 10 }).toISO(),
+      appointmentDay.set({ hour: 11, minute: 30 }).toISO(),
+    ]
+  );
+  const date = appointmentDay.toFormat('yyyy-LL-dd');
+  const dateLabel = appointmentDay.setLocale('es').toFormat("d 'de' LLLL 'de' yyyy");
+  const confirmationQuestion =
+    `Encontré tu cita de Uñas acrílicas del ${dateLabel} a las 10:00 a. m. ` +
+    '¿Confirmas que deseas cancelarla?';
+  const client = fakeClient([
+    {
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'list-cancellation-target', name: 'get_my_appointments', input: {} }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use',
+        id: 'wrong-availability-during-cancel',
+        name: 'check_availability',
+        input: {
+          date,
+          service_id: '22222222-2222-2222-2222-222222222203',
+          preferred_time: '10:00',
+        },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: confirmationQuestion }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [{
+        role: 'user',
+        content: `Cancela mi cita del ${dateLabel} a las 10:00 a. m.`,
+      }],
+      client,
+    });
+
+    assert.strictEqual(reply, confirmationQuestion);
+    assert.strictEqual(client.calls.length, 3);
+    const appointmentList = client.calls[1].messages.find(
+      (message) => Array.isArray(message.content) &&
+        message.content.some((block) => block.tool_use_id === 'list-cancellation-target')
+    );
+    assert.match(JSON.stringify(appointmentList), new RegExp(inserted.rows[0].id));
+    const blockedAvailability = client.calls[2].messages.find(
+      (message) => Array.isArray(message.content) &&
+        message.content.some((block) => block.tool_use_id === 'wrong-availability-during-cancel')
+    );
+    assert.match(JSON.stringify(blockedAvailability), /cancelacion_en_curso/);
+    assert.doesNotMatch(JSON.stringify(client.calls[2].messages), /fecha_solicitada/);
+
+    const stored = await db.query('SELECT status FROM appointments WHERE id = $1', [inserted.rows[0].id]);
+    assert.strictEqual(stored.rows[0].status, 'confirmed');
+  } finally {
+    await db.query('DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2', [business.id, clientPhone]);
+  }
+});
+
 test('no ejecuta cancel_appointment antes de pedir confirmación explícita', async () => {
   const appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 13 }).startOf('day');
   const clientPhone = 'testclient-ai-cancel-confirmation';

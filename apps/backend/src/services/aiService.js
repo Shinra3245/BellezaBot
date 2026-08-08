@@ -43,6 +43,8 @@ async function buildSystem(business) {
     `- Solo puedes decir que una cita quedó confirmada, agendada o reservada si create_appointment devolvió ` +
     `ok=true en el turno actual. Si la tool devuelve un error, la cita NO existe: explica el problema real y nunca la confirmes.\n` +
     `- Para cancelar o reprogramar, usa get_my_appointments para identificar la cita y confirma la acción antes de ejecutarla.\n` +
+    `- Si la clienta pide cancelar, no consultes disponibilidad ni intentes crear o reprogramar. ` +
+    `Usa get_my_appointments, solicita confirmación explícita y después usa únicamente cancel_appointment.\n` +
     `- Si la clienta rechaza un recordatorio, ayúdala a elegir un nuevo horario y usa reschedule_appointment; no crees una cita duplicada.\n` +
     `- Usa check_availability para proponer horarios reales; ofrece pocas opciones claras.\n` +
     `- Si la clienta solicita una hora exacta, conviértela a HH:MM de 24 horas y envíala como preferred_time ` +
@@ -191,16 +193,21 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
     client_suffix: iterationProfile.clientSuffix,
   });
   let availabilityDateNeedsCorrection = false;
+  const cancellationIntent = !isAdmin && isCancellationIntentTurn(history);
   const bookingDetailsContinuation = !isAdmin && isBookingDetailsContinuation(history);
   const requestedExactTime = !isAdmin ? getRequestedExactTime(history) : null;
   const requestedAvailabilityDate = !isAdmin
     ? getExpectedClientAvailabilityDate(history, business.timezone)
     : null;
   const exactAvailabilityRequired = Boolean(
-    requestedExactTime && (isAvailabilityCheckTurn(history) || bookingDetailsContinuation)
+    !cancellationIntent &&
+    requestedExactTime &&
+    (isAvailabilityCheckTurn(history) || bookingDetailsContinuation)
   );
   const availabilityDateRequired = Boolean(
-    requestedAvailabilityDate && (isAvailabilityCheckTurn(history) || bookingDetailsContinuation)
+    !cancellationIntent &&
+    requestedAvailabilityDate &&
+    (isAvailabilityCheckTurn(history) || bookingDetailsContinuation)
   );
   let exactAvailabilityChecked = false;
   let availabilityDateChecked = false;
@@ -250,7 +257,12 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
                 ...(requestedExactTime ? { preferred_time: requestedExactTime } : {}),
               }
             : block.input;
-          if (block.name === 'check_availability') {
+          const toolBlockedByCancellation =
+            cancellationIntent &&
+            (block.name === 'check_availability' ||
+              block.name === 'create_appointment' ||
+              block.name === 'reschedule_appointment');
+          if (block.name === 'check_availability' && !toolBlockedByCancellation) {
             logger.info('[ai] Consulta de disponibilidad', {
               business_id: business.id,
               date: toolInput?.date,
@@ -264,27 +276,30 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
           // Una confirmación de cancelación nunca autoriza otra escritura. Esta barrera
           // evita que el modelo convierta accidentalmente un "sí, cancélala" en una
           // creación o reprogramación, como ocurrió en producción.
-          const mutationBlockedByCancellation =
-            cancellationConfirmationRequired &&
-            (block.name === 'create_appointment' || block.name === 'reschedule_appointment');
           const cancellationBlockedWithoutConfirmation =
             !isAdmin && block.name === 'cancel_appointment' && !cancellationConfirmationRequired;
-          if (mutationBlockedByCancellation || cancellationBlockedWithoutConfirmation) {
+          if (toolBlockedByCancellation || cancellationBlockedWithoutConfirmation) {
+            const blockedError =
+              toolBlockedByCancellation &&
+              cancellationConfirmationRequired &&
+              (block.name === 'create_appointment' || block.name === 'reschedule_appointment')
+                ? 'cancelacion_pendiente'
+                : toolBlockedByCancellation
+                  ? 'cancelacion_en_curso'
+                  : 'confirmacion_cancelacion_requerida';
             result = JSON.stringify({
               ok: false,
-              error: mutationBlockedByCancellation
-                ? 'cancelacion_pendiente'
-                : 'confirmacion_cancelacion_requerida',
-              accion_requerida: mutationBlockedByCancellation
-                ? 'cancel_appointment'
+              error: blockedError,
+              accion_requerida: toolBlockedByCancellation
+                ? cancellationConfirmationRequired
+                  ? 'cancel_appointment'
+                  : 'get_my_appointments_y_solicitar_confirmacion'
                 : 'solicitar_confirmacion',
             });
-            logger.warn('[ai] Escritura bloqueada por seguridad de cancelación', {
+            logger.warn('[ai] Herramienta bloqueada por seguridad de cancelación', {
               business_id: business.id,
               blocked_tool: block.name,
-              reason: mutationBlockedByCancellation
-                ? 'cancelacion_pendiente'
-                : 'confirmacion_requerida',
+              reason: blockedError,
             });
           } else {
             result = await toolset.execute(block.name, toolInput, ctx);
@@ -659,12 +674,25 @@ function getRequestedExactTime(history) {
 }
 
 function isAvailabilityCheckTurn(history) {
+  if (isCancellationIntentTurn(history)) return false;
   const latestUser = [...history].reverse().find((message) => message.role === 'user');
   if (!latestUser) return false;
   const text = normalizeForIntent(latestUser.content);
   return (
     /\b(agend\w*|reserv\w*|cita\w*|disponib\w*|horario\w*|hora\w*|dia)\b/.test(text) ||
     /\ba\s+las?\s+\d{1,2}\b/.test(text)
+  );
+}
+
+function isCancellationIntentTurn(history) {
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return false;
+  const text = normalizeForIntent(latestUser.content);
+  return (
+    /\b(cancel\w*|anul\w*)\b/.test(text) ||
+    /\b(quitar|eliminar)\b[\s\S]{0,50}\b(cita|reservacion|turno)\b/.test(text) ||
+    /\b(no puedo|no podre|ya no quiero)\b[\s\S]{0,60}\b(cita|reservacion|turno|asistir)\b/.test(text) ||
+    isCancellationConfirmationTurn(history)
   );
 }
 
