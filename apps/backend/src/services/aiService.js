@@ -440,7 +440,24 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
       asksForServiceSelection(text) &&
       !claimsAvailability(text) &&
       !claimsAppointmentConfirmed(text);
-    if (safeServiceClarification) return text;
+    if (safeServiceClarification) {
+      const changesRequestedDate = Boolean(
+        requestedAvailabilityDate &&
+        mentionsDifferentAvailabilityDate(text, requestedAvailabilityDate, business.timezone)
+      );
+      if (changesRequestedDate) {
+        messages.push({ role: 'assistant', content: resp.content });
+        messages.push({
+          role: 'user',
+          content:
+            `Corrección interna obligatoria: la clienta ya eligió la fecha ${requestedAvailabilityDate}. ` +
+            'No la cambies ni propongas otros días mientras solicitas el servicio o el nombre. ' +
+            'Pregunta únicamente por los datos que todavía falten y conserva la fecha y hora originales.',
+        });
+        continue;
+      }
+      return text;
+    }
     if (exactAvailabilityRequired && !exactAvailabilityChecked) {
       messages.push({ role: 'assistant', content: resp.content });
       messages.push({
@@ -633,6 +650,10 @@ function getRequestedExactTime(history) {
   if (directTime) return directTime;
   if (!isBookingDetailsContinuation(history)) return null;
 
+  const previousUser = getPreviousUserMessage(history, latestUserIndex);
+  const previousUserTime = previousUser ? parseRequestedExactTime(previousUser.content) : null;
+  if (previousUserTime) return previousUserTime;
+
   const previousAssistant = getPreviousAssistantMessage(history, latestUserIndex);
   return previousAssistant ? parseRequestedExactTime(previousAssistant.content) : null;
 }
@@ -668,6 +689,13 @@ function getPreviousAssistantMessage(history, latestUserIndex) {
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role === 'assistant') return history[i];
     if (history[i].role === 'user') break;
+  }
+  return null;
+}
+
+function getPreviousUserMessage(history, latestUserIndex) {
+  for (let i = latestUserIndex - 1; i >= 0; i--) {
+    if (history[i].role === 'user') return history[i];
   }
   return null;
 }
@@ -817,6 +845,26 @@ function parseClientDate(value, timezone) {
   return parsed;
 }
 
+function getMentionedClientDates(value, timezone) {
+  const text = normalizeForIntent(value);
+  const candidates = [
+    ...text.matchAll(/\b\d{4}-\d{2}-\d{2}\b/g),
+    ...text.matchAll(
+      /\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:\s+(?:de|del)\s+\d{4})?\b/g
+    ),
+  ];
+  const dates = new Set();
+  for (const candidate of candidates) {
+    const parsed = parseClientDate(candidate[0], timezone);
+    if (parsed) dates.add(parsed.toFormat('yyyy-LL-dd'));
+  }
+  return [...dates];
+}
+
+function mentionsDifferentAvailabilityDate(text, requestedDate, timezone) {
+  return getMentionedClientDates(text, timezone).some((date) => date !== requestedDate);
+}
+
 function nextDateWithDayOfMonth(day, timezone) {
   const now = time.nowInZone(timezone).startOf('day');
   for (let monthOffset = 0; monthOffset <= 12; monthOffset++) {
@@ -846,6 +894,19 @@ function getExpectedClientAvailabilityDate(history, timezone) {
     isBookingDetailsContinuation(history)
   );
   if (!isContinuation) return null;
+
+  // Cuando la clienta responde servicio/nombre, la solicitud original de la
+  // clienta tiene prioridad sobre cualquier fecha alternativa que el bot haya
+  // introducido accidentalmente al pedir esos datos.
+  if (isBookingDetailsContinuation(history)) {
+    const previousUser = getPreviousUserMessage(history, latestUserIndex);
+    const previousUserDate = previousUser
+      ? parseClientDate(previousUser.content, timezone)
+      : null;
+    if (previousUserDate && (!referencedDay || previousUserDate.day === referencedDay)) {
+      return previousUserDate.toFormat('yyyy-LL-dd');
+    }
+  }
 
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role !== 'assistant') continue;

@@ -130,11 +130,60 @@ test('si fecha y hora vienen sin servicio permite preguntarlo sin agotar iteraci
   assert.strictEqual(client.calls.length, 1, 'debe aceptar la aclaración sin forzar check_availability');
 });
 
+test('al pedir el servicio no permite sustituir la fecha elegida por la clienta', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 5 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const requestedDate = appointmentDay.toFormat('yyyy-LL-dd');
+  const requestedLabel = appointmentDay.setLocale('es').toFormat("d 'de' LLLL");
+  const alternativeDay = appointmentDay.plus({ days: 2 });
+  const alternativeLabel = alternativeDay.setLocale('es').toFormat("d 'de' LLLL");
+  const correctedQuestion =
+    `Conservo el ${requestedLabel} a las 10:00 a. m. ¿Qué servicio prefieres?`;
+  const client = fakeClient([
+    {
+      stop_reason: 'end_turn',
+      content: [{
+        type: 'text',
+        text: `¿Qué servicio prefieres? También puedo ofrecerte el ${alternativeLabel}.`,
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: correctedQuestion }],
+    },
+  ]);
+
+  const reply = await aiService.generateReply({
+    business,
+    clientPhone: 'testclient-ai-date-preservation',
+    history: [{
+      role: 'user',
+      content: `Agenda una cita el ${requestedLabel} a las 10:00 a. m.`,
+    }],
+    client,
+  });
+
+  assert.strictEqual(reply, correctedQuestion);
+  assert.strictEqual(client.calls.length, 2);
+  assert.ok(
+    client.calls[1].messages.some(
+      (message) => typeof message.content === 'string' &&
+        message.content.includes(`ya eligió la fecha ${requestedDate}`)
+    ),
+    'debe corregir al modelo antes de mostrar una fecha alternativa'
+  );
+});
+
 test('conserva fecha y hora al recibir servicio y nombre antes de verificar disponibilidad', async () => {
   let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 7 }).startOf('day');
   while (appointmentDay.weekday !== 6) appointmentDay = appointmentDay.plus({ days: 1 });
   const date = appointmentDay.toFormat('yyyy-LL-dd');
   const dateLabel = appointmentDay.setLocale('es').toFormat("cccc d 'de' LLLL");
+  const firstAlternative = appointmentDay.plus({ days: 1 });
+  const secondAlternative = appointmentDay.plus({ days: 2 });
+  const alternativeLabel =
+    `${firstAlternative.setLocale('es').toFormat('cccc d')} o ` +
+    secondAlternative.setLocale('es').toFormat("cccc d 'de' LLLL");
   const falseClosedReply = `Lamento, el negocio está cerrado el ${dateLabel}.`;
   const finalReply = 'La hora está disponible. ¿Confirmas los datos de tu cita? 😊';
   const client = fakeClient([
@@ -169,10 +218,14 @@ test('conserva fecha y hora al recibir servicio y nombre antes de verificar disp
     clientPhone: 'testclient-ai-booking-details',
     history: [
       {
+        role: 'user',
+        content: `Necesito agendar una cita el ${dateLabel} a las 10:00 a. m.`,
+      },
+      {
         role: 'assistant',
         content:
-          `Para agendar el ${dateLabel} a las 10:00 a. m., ¿qué servicio prefieres? ` +
-          '¿A nombre de quién registro la cita?',
+          'Antes de continuar necesito saber qué servicio prefieres y a nombre de quién. ' +
+          `¿Qué día prefieres: ${alternativeLabel}? Así verifico las 10:00 a. m.`,
       },
       { role: 'user', content: 'Uñas acrílicas, a nombre de Prueba cierre' },
     ],
