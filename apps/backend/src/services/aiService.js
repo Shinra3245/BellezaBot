@@ -769,7 +769,7 @@ function isCancellationIntentTurn(history) {
 function asksForServiceSelection(text) {
   const normalized = normalizeForIntent(text);
   return (
-    /\b(cual|que)\b[\s\S]{0,50}\bservicio\b/.test(normalized) ||
+    /\b(cual|que)\s+(?:de\s+(?:estos|los|nuestros)\s+)?servicios?\b/.test(normalized) ||
     /\bservicio\b[\s\S]{0,50}\b(prefieres|deseas|quieres|eliges|necesitas)\b/.test(normalized)
   );
 }
@@ -842,8 +842,10 @@ function isAppointmentConfirmationTurn(history) {
 
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role !== 'assistant') continue;
-    const previousAssistant = normalizeForIntent(history[i].content);
-    const isAnotherAction = /\b(cancel\w*|reprogram\w*)\b/.test(previousAssistant);
+    const previousAssistant = getConfirmationActionContext(history[i].content);
+    const isAnotherAction =
+      hasExplicitCancellationAction(previousAssistant) ||
+      hasExplicitRescheduleAction(previousAssistant);
     return (
       !isAnotherAction &&
       /\bcita\b/.test(previousAssistant) &&
@@ -860,6 +862,32 @@ function isAffirmativeReply(normalizedText) {
   );
 }
 
+// Los resúmenes de confirmación incluyen datos libres proporcionados por la
+// clienta. Quitamos el nombre antes de detectar la acción para que valores como
+// "Prueba Reprogramar" o "Prueba Cancelar" no cambien el flujo solicitado.
+function getConfirmationActionContext(value) {
+  return normalizeForIntent(value)
+    .replace(
+      /(?:^|\n)\s*(?:[-•]\s*)?\**\s*(?:nombre|cliente)[^:\n]{0,3}:[^\n]*/g,
+      ' '
+    )
+    .replace(/\ba nombre de\s+[^,.;!?\n]+/g, ' ');
+}
+
+function hasExplicitCancellationAction(text) {
+  return (
+    /\bcancel\w*\b[\s\S]{0,35}\b(cita|reservacion|turno)\b/.test(text) ||
+    /\b(cita|reservacion|turno)\b[\s\S]{0,35}\bcancel\w*\b/.test(text)
+  );
+}
+
+function hasExplicitRescheduleAction(text) {
+  return (
+    /\b(reprogram\w*|reagend\w*)\b[\s\S]{0,35}\b(cita|reservacion|turno)\b/.test(text) ||
+    /\b(cita|reservacion|turno)\b[\s\S]{0,35}\b(reprogram\w*|reagend\w*)\b/.test(text)
+  );
+}
+
 // Reconoce el "sí" que responde directamente a una confirmación de cancelación.
 // Se mantiene separado de isAppointmentConfirmationTurn para que nunca active
 // accidentalmente create_appointment.
@@ -872,10 +900,10 @@ function isCancellationConfirmationTurn(history) {
 
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role !== 'assistant') continue;
-    const previousAssistant = normalizeForIntent(history[i].content);
+    const previousAssistant = getConfirmationActionContext(history[i].content);
     return (
       /\b(cita|reservacion|turno)\b/.test(previousAssistant) &&
-      /\bcancel\w*\b/.test(previousAssistant) &&
+      hasExplicitCancellationAction(previousAssistant) &&
       /\bconfirm\w*\b/.test(previousAssistant)
     );
   }
@@ -894,10 +922,10 @@ function isRescheduleConfirmationTurn(history) {
 
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role !== 'assistant') continue;
-    const previousAssistant = normalizeForIntent(history[i].content);
+    const previousAssistant = getConfirmationActionContext(history[i].content);
     return (
       /\b(cita|reservacion|turno)\b/.test(previousAssistant) &&
-      /\b(reprogram\w*|reagend\w*)\b/.test(previousAssistant) &&
+      hasExplicitRescheduleAction(previousAssistant) &&
       /\b(confirm\w*|correcto|correcta)\b/.test(previousAssistant)
     );
   }

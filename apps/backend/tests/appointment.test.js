@@ -216,7 +216,9 @@ test('cada servicio respeta su último inicio válido y rechaza terminar despué
 
   for (let i = 0; i < cases.length; i++) {
     const testCase = cases[i];
-    const date = futureOpenDay(18 + i).toFormat('yyyy-MM-dd');
+    // Separar los casos por dos días evita que un domingo y el lunes siguiente
+    // se normalicen a la misma fecha y que la propia prueba genere un empalme.
+    const date = futureOpenDay(16 + (i * 2)).toFormat('yyyy-MM-dd');
     const valid = await appointmentService.createAppointment({
       businessId: BUSINESS_ID,
       clientPhone: testCase.phone,

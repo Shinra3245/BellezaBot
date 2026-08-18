@@ -850,6 +850,86 @@ test('no afirma una cancelación cuando cancel_appointment falla', async () => {
   }
 });
 
+test('un nombre con la palabra Reprogramar no convierte una cita nueva en reprogramación', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 8 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const clientPhone = 'testclient-ai-name-reprogramar';
+  const startsAt = appointmentDay.set({ hour: 13 });
+  const finalMessage = '🎉 Tu cita de Manicure quedó confirmada.';
+  const client = fakeClient([
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: finalMessage }],
+    },
+    {
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use', id: 'create-with-reschedule-word-in-name', name: 'create_appointment',
+        input: {
+          service_id: '22222222-2222-2222-2222-222222222201',
+          datetime_iso: startsAt.toISO(),
+          client_name: 'Prueba Reprogramar',
+        },
+      }],
+    },
+    {
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: finalMessage }],
+    },
+  ]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [
+        {
+          role: 'assistant',
+          content: [
+            'Antes de confirmar tu cita, revisa que todo esté correcto:',
+            '*Servicio:* Manicure',
+            `*Fecha y hora:* ${appointmentDay.toFormat('yyyy-LL-dd')}, 1:00 p. m.`,
+            '*Nombre:* Prueba Reprogramar',
+            '¿Confirmas todos estos datos?',
+          ].join('\n'),
+        },
+        { role: 'user', content: 'Sí, confirmo' },
+      ],
+      client,
+    });
+
+    assert.strictEqual(reply, finalMessage);
+    assert.strictEqual(client.calls.length, 3);
+    assert.ok(
+      client.calls[1].messages.some(
+        (message) => typeof message.content === 'string' &&
+          message.content.includes('la clienta ya confirmó los datos de la cita')
+      ),
+      'debe reconocer la confirmación como creación aunque el nombre diga Reprogramar'
+    );
+    assert.doesNotMatch(JSON.stringify(client.calls), /reprogramacion_en_curso/);
+
+    const stored = await db.query(
+      `SELECT client_name, status, starts_at
+       FROM appointments
+       WHERE business_id = $1 AND client_phone = $2`,
+      [business.id, clientPhone]
+    );
+    assert.strictEqual(stored.rows.length, 1);
+    assert.strictEqual(stored.rows[0].client_name, 'Prueba Reprogramar');
+    assert.strictEqual(stored.rows[0].status, 'confirmed');
+    assert.strictEqual(
+      DateTime.fromJSDate(stored.rows[0].starts_at).setZone(business.timezone).toFormat('yyyy-LL-dd HH:mm'),
+      startsAt.toFormat('yyyy-LL-dd HH:mm')
+    );
+  } finally {
+    await db.query(
+      'DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2',
+      [business.id, clientPhone]
+    );
+  }
+});
+
 test('una confirmación de reprogramación actualiza la cita real y no crea duplicados', async () => {
   let originalDay = DateTime.now().setZone(business.timezone).plus({ days: 17 }).startOf('day');
   if (originalDay.weekday === 7) originalDay = originalDay.plus({ days: 1 });
