@@ -86,7 +86,7 @@ const env = {
   // El límite evita ciclos costosos. Los teléfonos permitidos para QA reciben
   // un margen mayor, pero nunca quedan sin una cota de seguridad.
   AI_MAX_TOOL_ITERATIONS: positiveIntegerFromEnv('AI_MAX_TOOL_ITERATIONS', 5),
-  AI_EXTENDED_MAX_TOOL_ITERATIONS: positiveIntegerFromEnv('AI_EXTENDED_MAX_TOOL_ITERATIONS', 12),
+  AI_EXTENDED_MAX_TOOL_ITERATIONS: positiveIntegerFromEnv('AI_EXTENDED_MAX_TOOL_ITERATIONS', 30),
   AI_EXTENDED_TOOL_PHONES: commaSeparatedValues('AI_EXTENDED_TOOL_PHONES'),
 
   CLIENT_RATE_LIMIT_PER_HOUR: positiveIntegerFromEnv('CLIENT_RATE_LIMIT_PER_HOUR', 30),

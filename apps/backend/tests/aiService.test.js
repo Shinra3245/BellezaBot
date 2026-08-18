@@ -80,7 +80,7 @@ test('un teléfono de QA usa el límite ampliado sin quedar ilimitado', async ()
   // Railway puede guardar solo los 10 dígitos nacionales mientras Meta entrega
   // 521 + número; ambos formatos deben identificar al mismo teléfono.
   env.AI_EXTENDED_TOOL_PHONES = ['5511223344'];
-  env.AI_EXTENDED_MAX_TOOL_ITERATIONS = 12;
+  env.AI_EXTENDED_MAX_TOOL_ITERATIONS = 30;
 
   const repeatedToolCalls = Array.from({ length: 6 }, (_, index) => ({
     stop_reason: 'tool_use',
@@ -103,6 +103,86 @@ test('un teléfono de QA usa el límite ampliado sin quedar ilimitado', async ()
   } finally {
     env.AI_EXTENDED_TOOL_PHONES = previousPhones;
     env.AI_EXTENDED_MAX_TOOL_ITERATIONS = previousExtendedLimit;
+  }
+});
+
+test('consulta las citas propias directamente sin consumir iteraciones de Anthropic', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 15 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const clientPhone = 'testclient-ai-direct-appointments';
+  await db.query(
+    `INSERT INTO appointments
+       (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba consulta directa',
+      appointmentDay.set({ hour: 13 }).toISO(),
+      appointmentDay.set({ hour: 13, minute: 45 }).toISO(),
+    ]
+  );
+  const client = fakeClient([]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [{ role: 'user', content: '¿Qué citas tengo programadas?' }],
+      client,
+    });
+
+    assert.match(reply, /Tus próximas citas/);
+    assert.match(reply, /Manicure/);
+    assert.match(reply, /Confirmada/);
+    assert.match(reply, /cancelar o reprogramar/);
+    assert.doesNotMatch(reply, /\|/);
+    assert.strictEqual(client.calls.length, 0, 'la consulta no debe depender de Anthropic');
+  } finally {
+    await db.query(
+      'DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2',
+      [business.id, clientPhone]
+    );
+  }
+});
+
+test('una solicitud genérica de reprogramación muestra las citas directamente', async () => {
+  let appointmentDay = DateTime.now().setZone(business.timezone).plus({ days: 16 }).startOf('day');
+  if (appointmentDay.weekday === 7) appointmentDay = appointmentDay.plus({ days: 1 });
+  const clientPhone = 'testclient-ai-direct-reschedule';
+  await db.query(
+    `INSERT INTO appointments
+       (business_id, service_id, client_phone, client_name, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'confirmed')`,
+    [
+      business.id,
+      '22222222-2222-2222-2222-222222222201',
+      clientPhone,
+      'Prueba reprogramación directa',
+      appointmentDay.set({ hour: 14 }).toISO(),
+      appointmentDay.set({ hour: 14, minute: 45 }).toISO(),
+    ]
+  );
+  const client = fakeClient([]);
+
+  try {
+    const reply = await aiService.generateReply({
+      business,
+      clientPhone,
+      history: [{ role: 'user', content: 'Quiero reprogramar una cita' }],
+      client,
+    });
+
+    assert.match(reply, /Tus próximas citas/);
+    assert.match(reply, /Manicure/);
+    assert.match(reply, /Cuál deseas reprogramar/);
+    assert.strictEqual(client.calls.length, 0, 'no debe responder solo que revisará las citas');
+  } finally {
+    await db.query(
+      'DELETE FROM appointments WHERE business_id = $1 AND client_phone = $2',
+      [business.id, clientPhone]
+    );
   }
 });
 
@@ -886,7 +966,7 @@ test('un nombre con la palabra Reprogramar no convierte una cita nueva en reprog
         {
           role: 'assistant',
           content: [
-            'Antes de confirmar tu cita, revisa que todo esté correcto:',
+            'Antes de continuar, revisa que todo esté correcto:',
             '*Servicio:* Manicure',
             `*Fecha y hora:* ${appointmentDay.toFormat('yyyy-LL-dd')}, 1:00 p. m.`,
             '*Nombre:* Prueba Reprogramar',

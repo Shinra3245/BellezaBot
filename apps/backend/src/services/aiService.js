@@ -128,6 +128,7 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
   if (env.AI_MODE === 'mock' && !client) return MOCK_REPLY;
 
   const ctx = { business, clientPhone };
+  const clientAppointmentReadMode = !isAdmin ? getClientAppointmentReadMode(history) : null;
   const adminExpectedAgendaDate = isAdmin ? getExpectedAdminAgendaDate(history, business.timezone) : null;
   const adminWeekReferenceDate =
     isAdmin && !adminExpectedAgendaDate ? getAdminWeekReferenceDate(history, business.timezone) : null;
@@ -177,6 +178,23 @@ async function generateReply({ business, clientPhone, history, client, isAdmin =
         count: parsedResult.total,
       });
       return formatAdminWeekSummary(parsedResult, business.timezone);
+    }
+  }
+
+  // Las consultas de citas propias y el inicio genérico de una reprogramación no
+  // necesitan interpretación adicional. Resolverlas directamente evita que el
+  // modelo describa que "va a revisar" y consuma el resto de iteraciones sin
+  // presentar el resultado real de get_my_appointments.
+  if (clientAppointmentReadMode) {
+    const rawResult = await botTools.execute('get_my_appointments', {}, ctx);
+    const parsedResult = parseToolResult(rawResult);
+    if (Array.isArray(parsedResult?.citas) && !parsedResult.error) {
+      logger.info('[ai] Citas de clienta resueltas directamente', {
+        business_id: business.id,
+        mode: clientAppointmentReadMode,
+        count: parsedResult.citas.length,
+      });
+      return formatClientUpcomingAppointments(parsedResult, clientAppointmentReadMode);
     }
   }
 
@@ -842,17 +860,42 @@ function isAppointmentConfirmationTurn(history) {
 
   for (let i = latestUserIndex - 1; i >= 0; i--) {
     if (history[i].role !== 'assistant') continue;
+    const previousAssistantRaw = normalizeForIntent(history[i].content);
     const previousAssistant = getConfirmationActionContext(history[i].content);
     const isAnotherAction =
       hasExplicitCancellationAction(previousAssistant) ||
       hasExplicitRescheduleAction(previousAssistant);
+    const hasBookingSummary =
+      /\bcita\b/.test(previousAssistant) ||
+      (/\bservicio\b/.test(previousAssistantRaw) &&
+        /\b(fecha|hora)\b/.test(previousAssistantRaw) &&
+        /\bnombre\b/.test(previousAssistantRaw));
     return (
       !isAnotherAction &&
-      /\bcita\b/.test(previousAssistant) &&
+      hasBookingSummary &&
       /\bconfirm(?:o|ar|as|acion)\b/.test(previousAssistant)
     );
   }
   return false;
+}
+
+function getClientAppointmentReadMode(history) {
+  const latestUser = [...history].reverse().find((message) => message.role === 'user');
+  if (!latestUser) return null;
+  const text = normalizeForIntent(latestUser.content);
+
+  const asksForOwnAppointments =
+    /\b(que|cuales|cuantas|mostrar|muestra|ver|consulta|consultar|revisa|revisar|lista|listar)\b[\s\S]{0,60}\b(mis|tengo|proximas|programadas|agendadas)?\s*(citas|reservaciones|reservas|turnos)\b/.test(text) ||
+    /\b(mis|que)\s+(citas|reservaciones|reservas|turnos)\b/.test(text);
+  if (asksForOwnAppointments) return 'list';
+
+  const genericRescheduleRequest =
+    /\b(reprogram\w*|reagend\w*)\b/.test(text) &&
+    /\b(cita|reservacion|reserva|turno)\b/.test(text) &&
+    !parseRequestedExactTime(text) &&
+    !/\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/.test(text) &&
+    !/\b\d{1,2}\b/.test(text);
+  return genericRescheduleRequest ? 'reschedule' : null;
 }
 
 function isAffirmativeReply(normalizedText) {
@@ -1217,12 +1260,41 @@ const ADMIN_STATUS_LABELS = {
   no_show: '⚠️ No asistió',
 };
 
+const CLIENT_STATUS_LABELS = {
+  pending: '⏳ Pendiente',
+  confirmed: '✅ Confirmada',
+  rescheduled: '🔄 Reprogramada',
+};
+
 function capitalize(value) {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
 function appointmentCountLabel(count) {
   return `${count} ${count === 1 ? 'cita' : 'citas'}`;
+}
+
+function formatClientUpcomingAppointments(result, mode) {
+  if (result.citas.length === 0) {
+    return 'No tienes citas próximas activas. ¿Quieres agendar una nueva? 😊';
+  }
+
+  const lines = ['📅 *Tus próximas citas*'];
+  result.citas.forEach((appointment, index) => {
+    lines.push(
+      '',
+      `*${index + 1}. ${appointment.servicio}*`,
+      `🗓️ ${appointment.cuando}`,
+      CLIENT_STATUS_LABELS[appointment.estado] || `Estado: ${appointment.estado}`
+    );
+  });
+  lines.push(
+    '',
+    mode === 'reschedule'
+      ? '¿Cuál deseas reprogramar? Indícame el número de la cita y la nueva fecha y hora. 😊'
+      : '¿Necesitas cancelar o reprogramar alguna? 😊'
+  );
+  return lines.join('\n');
 }
 
 function formatAdminDailyAgenda(result, timezone) {
